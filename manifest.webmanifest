@@ -1,0 +1,10 @@
+{
+  "name": "CLOUDORA — Personal Cloud Gallery & Storage",
+  "short_name": "Cloudora",
+  "description": "Your Memories. Your Cloud. Anytime. Android-first expandable personal cloud storage.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0B0F17",
+  "theme_color": "#06B6D4"
+}
