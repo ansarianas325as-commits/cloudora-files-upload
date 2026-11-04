@@ -1,0 +1,10 @@
+{
+  "name": "cloudora-central",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "CLOUDORA uploaded-files UI with a central Vercel Blob backend. No browser-only storage.",
+  "dependencies": {
+    "@vercel/blob": "^1.0.0"
+  }
+}

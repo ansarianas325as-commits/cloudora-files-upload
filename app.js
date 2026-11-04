@@ -490,64 +490,58 @@ function synthesizeRealVideoFile(index) {
 }
 
 // ============================================================================
-// PERSISTENT STORAGE ENGINE (IndexedDB + LocalStorage Metadata Sync)
+// CENTRAL STORAGE ENGINE (Vercel Blob via /api/cloudora)
 // ============================================================================
+// The browser stores ONLY a session token (cloudora_central_session_token).
+// No user data, no files, no whole-database JSON is stored in localStorage.
+// Old browser-only accounts (localStorage key cloudora_production_db_v1)
+// are NOT migrated: they belong to the old browser-only build and cannot
+// be verified by the server. Users must register once on the central
+// server; that account then works in any browser.
+// Free limit: 1 GB (Vercel Blob Hobby). Never "unlimited", never 1 TB.
 
-const STORAGE_KEY_STATE = 'cloudora_production_db_v1';
+const CENTRAL_SESSION_KEY = 'cloudora_central_session_token';
+const FREE_LIMIT_BYTES = 1073741824;
+function centralToken() {
+  try { return localStorage.getItem(CENTRAL_SESSION_KEY); } catch { return null; }
+}
+function centralNodes() {
+  return [{ id: 'central-vercel-blob', name: 'Central Vercel Blob', provider: 'vercel-blob',
+    bucket: 'cloudora-files-upload-store', endpoint: '', region: 'iad1',
+    provisionedBytes: FREE_LIMIT_BYTES, isConnected: true, addedAt: new Date().toISOString() }];
+}
+async function apiPost(action, body) {
+  const res = await fetch('/api/cloudora?action=' + encodeURIComponent(action), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  let data = {};
+  try { data = await res.json(); } catch {}
+  return { status: res.status, ...data };
+}
+function centralDownloadUrl(fileId, tok) {
+  return '/api/cloudora?action=download&fileId=' + encodeURIComponent(fileId) + '&token=' + encodeURIComponent(tok || centralToken() || '');
+}
+function mapServerFile(f, tok) {
+  // The UI renders images/videos from thumbnailDataUrl/originalDataUrl.
+  // Central files have no data URL stored anywhere; the preview URL is
+  // the auth-checked server download URL, so the same <img>/<video> src
+  // paths work without storing file bytes in the browser.
+  const preview = centralDownloadUrl(f.id, tok);
+  return { id: f.id, userId: f.userId, folderId: f.folderId || null,
+    filename: f.filename, originalFilename: f.filename, mimeType: f.mimeType,
+    category: f.category, sizeBytes: f.sizeBytes, sha256Checksum: f.sha256Checksum || null,
+    storageProvider: 'vercel-blob', storageBucket: 'cloudora-files-upload-store',
+    objectKey: 'central/' + f.id, thumbnailDataUrl: preview, originalDataUrl: preview,
+    isTrashed: !!f.isTrashed, capturedAt: f.capturedAt || f.uploadedAt, uploadedAt: f.uploadedAt,
+    lastViewedAt: f.lastViewedAt || null,
+    metadata: { width: f.metadata && f.metadata.width ? f.metadata.width : undefined,
+      height: f.metadata && f.metadata.height ? f.metadata.height : undefined,
+      durationSeconds: f.metadata && f.metadata.durationSeconds ? f.metadata.durationSeconds : undefined } };
+}
 function loadInitialDbState() {
-  const defaultNodes = [{
-    id: 'node-indexeddb-primary',
-    name: 'Android Device + IndexedDB Object Vault',
-    provider: 'indexeddb-local',
-    bucket: 'cloudora-local-vault',
-    endpoint: 'indexeddb://cloudora.storage.local',
-    region: 'local-device',
-    provisionedBytes: 0,
-    isConnected: true,
-    addedAt: new Date().toISOString()
-  }, {
-    id: 'node-cloudflare-r2-edge',
-    name: 'Cloudflare R2 Zero-Egress Cluster',
-    provider: 'cloudflare-r2',
-    bucket: 'cloudora-media-global',
-    endpoint: 'https://account.r2.cloudflarestorage.com',
-    region: 'auto-global',
-    provisionedBytes: 1099511627776,
-    isConnected: true,
-    addedAt: new Date().toISOString()
-  }];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_STATE);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        users: parsed.users || [],
-        sessions: parsed.sessions || [],
-        folders: parsed.folders || [],
-        files: parsed.files || [],
-        favourites: parsed.favourites || [],
-        sharedLinks: parsed.sharedLinks || [],
-        trash: parsed.trash || [],
-        storageNodes: parsed.storageNodes?.length ? parsed.storageNodes : defaultNodes,
-        userSettings: parsed.userSettings || {},
-        notifications: parsed.notifications || [],
-        activityLogs: parsed.activityLogs || []
-      };
-    }
-  } catch {}
-  return {
-    users: [],
-    sessions: [],
-    folders: [],
-    files: [],
-    favourites: [],
-    sharedLinks: [],
-    trash: [],
-    storageNodes: defaultNodes,
-    userSettings: {},
-    notifications: [],
-    activityLogs: []
-  };
+  return { users: [], sessions: [], folders: [], files: [], favourites: [], sharedLinks: [],
+    trash: [], storageNodes: centralNodes(), userSettings: {}, notifications: [], activityLogs: [] };
 }
 function defaultSettingsForUser(userId) {
   return {
@@ -568,6 +562,76 @@ function defaultSettingsForUser(userId) {
   };
 }
 
+// Measure real image/video dimensions from the File object itself.
+// Returns 0 for anything that cannot be measured — never invented values.
+async function measureMediaFile(file) {
+  if (file.type && file.type.startsWith('image/')) {
+    try {
+      const url = URL.createObjectURL(file);
+      const dims = await new Promise(resolve => {
+        const img = new Image();
+        img.onload = () => resolve({ width: img.naturalWidth || 0, height: img.naturalHeight || 0 });
+        img.onerror = () => resolve({ width: 0, height: 0 });
+        img.src = url;
+      });
+      URL.revokeObjectURL(url);
+      return { width: dims.width, height: dims.height, durationSeconds: 0 };
+    } catch { return { width: 0, height: 0, durationSeconds: 0 }; }
+  }
+  if (file.type && file.type.startsWith('video/')) {
+    try {
+      const url = URL.createObjectURL(file);
+      const dims = await new Promise(resolve => {
+        const v = document.createElement('video');
+        v.preload = 'metadata'; v.muted = true;
+        v.onloadedmetadata = () => resolve({ width: v.videoWidth || 0, height: v.videoHeight || 0, durationSeconds: Number.isFinite(v.duration) ? Math.round(v.duration * 10) / 10 : 0 });
+        v.onerror = () => resolve({ width: 0, height: 0, durationSeconds: 0 });
+        v.src = url;
+      });
+      URL.revokeObjectURL(url);
+      return dims;
+    } catch { return { width: 0, height: 0, durationSeconds: 0 }; }
+  }
+  return { width: 0, height: 0, durationSeconds: 0 };
+}
+
+// Unauthenticated shared-file screen. A recipient who opens
+// /?share=<shareId> in ANY browser sees this without an account.
+// The file itself is only served by the server after the share password
+// check (shareInfo) and the download check (download with shareId).
+function ShareScreen(props) {
+  const [info, setInfo] = useState(null);
+  const [error, setError] = useState(null);
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(true);
+  const load = async pw => {
+    setLoading(true); setError(null);
+    const res = await apiPost('shareInfo', { shareId: props.shareId, password: pw || '' });
+    if (!res.ok) { setError(res.error || 'Share link unavailable.'); setInfo(null); }
+    else setInfo(res);
+    setLoading(false);
+  };
+  useEffect(() => { load(''); }, []);
+  const dlUrl = (dl) => '/api/cloudora?action=download&fileId=' + encodeURIComponent(info ? info.file.id : '') + '&shareId=' + encodeURIComponent(props.shareId) + '&sharePw=' + encodeURIComponent(password) + (dl ? '&dl=1' : '');
+  return React.createElement("div", { className: "min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col justify-center items-center p-4" },
+    React.createElement("div", { className: "w-full max-w-[430px] bg-[#111827] border border-slate-800/90 rounded-3xl p-6 shadow-2xl space-y-3 text-center" },
+      React.createElement("h1", { className: "text-2xl font-extrabold" }, "CLOUDORA"),
+      React.createElement("p", { className: "text-xs text-cyan-400" }, "Shared File"),
+      loading ? React.createElement("p", { className: "text-xs text-slate-400" }, "Loading shared file…")
+      : error ? React.createElement("div", { className: "space-y-3" },
+          React.createElement("p", { className: "text-xs text-rose-300" }, error),
+          error.includes('Password') ? React.createElement("div", { className: "space-y-2" },
+            React.createElement("input", { type: "password", placeholder: "Enter link password", value: password, onChange: e => setPassword(e.target.value), className: "w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-sm" }),
+            React.createElement("button", { type: "button", onClick: () => load(password), className: "w-full py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs" }, "Unlock Shared File")) : null)
+      : info ? React.createElement("div", { className: "space-y-3" },
+          info.file.category === 'image' ? React.createElement("img", { src: dlUrl(false), alt: info.file.filename, className: "w-40 h-40 object-cover rounded-2xl mx-auto" }) : null,
+          React.createElement("p", { className: "text-xs font-bold" }, info.file.filename),
+          React.createElement("p", { className: "text-[11px] text-slate-400" }, formatBytes(info.file.sizeBytes), " • Shared by ", info.owner),
+          info.share.allowDownload ? React.createElement("a", { href: dlUrl(true), className: "block w-full py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs" }, "Download Original")
+          : React.createElement("p", { className: "text-[11px] text-amber-400" }, "Owner disabled downloads for this link (View Only).")) : null,
+      React.createElement("a", { href: window.location.pathname, className: "block text-xs text-cyan-400 hover:underline" }, "Go to Cloudora sign in")));
+}
+
 // ============================================================================
 // MAIN CLOUDORA APPLICATION COMPONENT
 // ============================================================================
@@ -576,12 +640,12 @@ function App() {
   const [db, setDb] = useState(() => loadInitialDbState());
   const [currentSessionToken, setCurrentSessionToken] = useState(() => {
     try {
-      return localStorage.getItem('cloudora_active_session_token');
+      return localStorage.getItem(CENTRAL_SESSION_KEY);
     } catch {
       return null;
     }
   });
-  const [browserQuotaBytes, setBrowserQuotaBytes] = useState(10737418240);
+  const [browserQuotaBytes, setBrowserQuotaBytes] = useState(0);
   const [isOnline, setIsOnline] = useState(true);
 
   // Auth Screen State
@@ -682,20 +746,10 @@ function App() {
     const t = setTimeout(() => setToast(null), 3400);
     return () => clearTimeout(t);
   }, [toast]);
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify(db));
-    } catch {}
-  }, [db]);
+  // Central build: db is in-memory only and is reloaded from the server.
+  // Nothing is written to localStorage except the session token.
   useEffect(() => {
     let mounted = true;
-    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
-      navigator.storage.estimate().then(est => {
-        if (mounted && est.quota && est.quota > 0) {
-          setBrowserQuotaBytes(est.quota);
-        }
-      }).catch(() => {});
-    }
     const handleOnline = () => {
       setIsOnline(true);
       showToast('Network connection restored. Resuming queued uploads.', 'success');
@@ -742,7 +796,12 @@ function App() {
         }
       };
     });
-  }, [currentUser]);
+    const tok = centralToken();
+    if (tok) {
+      const merged = { ...(db.userSettings[currentUser.id] || defaultSettingsForUser(currentUser.id)), ...patch };
+      apiPost('settingsSave', { token: tok, settings: merged }).catch(() => {});
+    }
+  }, [currentUser, db.userSettings]);
   const logActivity = useCallback((action, details, notifyTitle, notifyKind = 'info') => {
     if (!currentUser) return;
     const now = new Date().toISOString();
@@ -771,6 +830,42 @@ function App() {
     });
   }, [currentUser]);
 
+  // Central data refresh: reload the signed-in user's files, folders,
+  // favourites, shares and trash from the server into the in-memory db.
+  const refreshCentral = async tok => {
+    const token = tok || centralToken();
+    if (!token) return false;
+    const me = await apiPost('me', { token });
+    if (!me.ok || !me.user) return false;
+    const list = await apiPost('listFiles', { token });
+    if (!list.ok) return false;
+    const settings = { ...defaultSettingsForUser(me.user.id), ...(me.settings || {}) };
+    setDb({
+      users: [me.user],
+      sessions: [{ token, userId: me.user.id, expiresAt: new Date(Date.now() + 30 * 86400000).toISOString() }],
+      folders: list.folders || [],
+      files: (list.files || []).map(f => mapServerFile(f, token)),
+      favourites: list.favourites || [],
+      sharedLinks: list.sharedLinks || [],
+      trash: list.trash || [],
+      storageNodes: centralNodes(),
+      userSettings: { [me.user.id]: settings },
+      notifications: [], activityLogs: []
+    });
+    return true;
+  };
+  useEffect(() => {
+    const tok = centralToken();
+    if (!tok) return;
+    refreshCentral(tok).then(ok => {
+      if (!ok) {
+        try { localStorage.removeItem(CENTRAL_SESSION_KEY); } catch {}
+        setCurrentSessionToken(null);
+      }
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ============================================================================
   // AUTHENTICATION HANDLERS
   // ============================================================================
@@ -785,7 +880,7 @@ function App() {
       return;
     }
     if (!/^[a-z0-9_.-]{3,32}$/.test(cleanUsername)) {
-      setAuthError('Username must be 3–32 characters (letters, numbers, _, ., -).');
+      setAuthError('Username must be 3-32 characters (letters, numbers, _, ., -).');
       return;
     }
     if (authType === 'pin') {
@@ -797,187 +892,63 @@ function App() {
       setAuthError('Password must be at least 6 characters.');
       return;
     }
-    const exists = db.users.some(u => u.username.toLowerCase() === cleanUsername);
-    if (exists) {
-      setAuthError(`Username "@${cleanUsername}" is already taken. Please choose a unique username.`);
+    // Central registration: the server is the only source of truth for
+    // uniqueness. A username taken in ANY browser is rejected here.
+    const res = await apiPost('register', { fullName: cleanFullName, username: cleanUsername, secret: authSecret, authType, persistent: authPersistent });
+    if (!res.ok || !res.token) {
+      setAuthError(res.error || 'Registration failed.');
       return;
     }
-    const salt = generateId();
-    const passwordHash = await hashSecretWithSalt(authSecret, salt);
-    const rawRecoveryCode = `CLD-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
-    const recoveryCodeHash = await hashSecretWithSalt(rawRecoveryCode, salt);
-    const newUserId = generateId();
-    const avatarColors = ['#06b6d4', '#14b8a6', '#3b82f6', '#8b5cf6', '#10b981'];
-    const newUser = {
-      id: newUserId,
-      fullName: cleanFullName,
-      username: cleanUsername,
-      authType,
-      passwordHash,
-      salt,
-      recoveryCodeHash,
-      recoveryCodePlainPreview: rawRecoveryCode,
-      avatarColor: avatarColors[db.users.length % avatarColors.length],
-      failedLoginAttempts: 0,
-      lockedUntil: null,
-      createdAt: new Date().toISOString()
-    };
-    const sessionToken = generateId() + generateId();
-    const newSession = {
-      id: generateId(),
-      userId: newUserId,
-      token: sessionToken,
-      csrfToken: generateId(),
-      deviceLabel: 'Android Chrome PWA Session',
-      persistent: authPersistent,
-      createdAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + (authPersistent ? 30 : 1) * 86400000).toISOString()
-    };
-    const defaultFolders = [{
-      id: generateId(),
-      userId: newUserId,
-      parentId: null,
-      name: 'Camera Roll',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }, {
-      id: generateId(),
-      userId: newUserId,
-      parentId: null,
-      name: 'Documents & Receipts',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }];
-    setDb(prev => ({
-      ...prev,
-      users: [...prev.users, newUser],
-      sessions: [...prev.sessions, newSession],
-      folders: [...prev.folders, ...defaultFolders],
-      userSettings: {
-        ...prev.userSettings,
-        [newUserId]: defaultSettingsForUser(newUserId)
-      },
-      notifications: [{
-        id: generateId(),
-        userId: newUserId,
-        title: 'Welcome to CLOUDORA',
-        message: `Private encrypted vault provisioned for @${cleanUsername}. Tap + to upload photos, videos, or files.`,
-        kind: 'success',
-        isRead: false,
-        createdAt: new Date().toISOString()
-      }, ...prev.notifications]
-    }));
-    try {
-      localStorage.setItem('cloudora_active_session_token', sessionToken);
-    } catch {}
-    setCurrentSessionToken(sessionToken);
-    setGeneratedRecoveryModal(rawRecoveryCode);
+    try { localStorage.setItem(CENTRAL_SESSION_KEY, res.token); } catch {}
+    setCurrentSessionToken(res.token);
+    setGeneratedRecoveryModal(res.recoveryCode || null);
     setAuthSecret('');
-    showToast(`Account @${cleanUsername} created with private storage!`, 'success');
+    showToast(`Account @${cleanUsername} created on the central server!`, 'success');
+    await refreshCentral(res.token);
   };
+
   const handleLogin = async e => {
     e.preventDefault();
     setAuthError(null);
     const cleanUsername = authUsername.trim().toLowerCase();
-    const user = db.users.find(u => u.username.toLowerCase() === cleanUsername);
-    if (!user) {
-      setAuthError('Invalid username or password/PIN.');
+    const res = await apiPost('login', { username: cleanUsername, secret: authSecret, persistent: authPersistent });
+    if (!res.ok || !res.token) {
+      setAuthError(res.error || 'Invalid username or password/PIN.');
       return;
     }
-    if (user.lockedUntil && user.lockedUntil > Date.now()) {
-      const waitSecs = Math.ceil((user.lockedUntil - Date.now()) / 1000);
-      setAuthError(`Rate limit active: Too many failed attempts. Try again in ${waitSecs}s.`);
-      return;
-    }
-    const candidateHash = await hashSecretWithSalt(authSecret, user.salt);
-    if (candidateHash !== user.passwordHash) {
-      const nextAttempts = user.failedLoginAttempts + 1;
-      const lockTime = nextAttempts >= 5 ? Date.now() + 60000 : null;
-      setDb(prev => ({
-        ...prev,
-        users: prev.users.map(u => u.id === user.id ? {
-          ...u,
-          failedLoginAttempts: nextAttempts,
-          lockedUntil: lockTime
-        } : u)
-      }));
-      setAuthError(lockTime ? '5 failed login attempts detected. Account locked for 60 seconds.' : `Invalid credentials (${5 - nextAttempts} attempts remaining before rate-limit lockout).`);
-      return;
-    }
-    const sessionToken = generateId() + generateId();
-    const newSession = {
-      id: generateId(),
-      userId: user.id,
-      token: sessionToken,
-      csrfToken: generateId(),
-      deviceLabel: 'Android Chrome PWA Session',
-      persistent: authPersistent,
-      createdAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + (authPersistent ? 30 : 1) * 86400000).toISOString()
-    };
-    setDb(prev => ({
-      ...prev,
-      users: prev.users.map(u => u.id === user.id ? {
-        ...u,
-        failedLoginAttempts: 0,
-        lockedUntil: null
-      } : u),
-      sessions: [...prev.sessions, newSession]
-    }));
-    try {
-      localStorage.setItem('cloudora_active_session_token', sessionToken);
-    } catch {}
-    setCurrentSessionToken(sessionToken);
+    try { localStorage.setItem(CENTRAL_SESSION_KEY, res.token); } catch {}
+    setCurrentSessionToken(res.token);
     setAuthSecret('');
-    showToast(`Welcome back, ${user.fullName}!`, 'success');
+    showToast(`Welcome back, ${res.user ? res.user.fullName : cleanUsername}!`, 'success');
+    await refreshCentral(res.token);
   };
+
   const handleAccountRecovery = async e => {
     e.preventDefault();
     setAuthError(null);
     const cleanUsername = authUsername.trim().toLowerCase();
-    const user = db.users.find(u => u.username.toLowerCase() === cleanUsername);
-    if (!user) {
-      setAuthError('Account not found.');
-      return;
-    }
-    const candidateRecHash = await hashSecretWithSalt(authRecoveryInput.trim().toUpperCase(), user.salt);
-    if (candidateRecHash !== user.recoveryCodeHash) {
-      setAuthError('Invalid recovery code.');
-      return;
-    }
-    if (!authNewSecret || authNewSecret.length < 1) {
+    if (!authNewSecret) {
       setAuthError('Please provide a new password or PIN.');
       return;
     }
-    const newHash = await hashSecretWithSalt(authNewSecret, user.salt);
-    setDb(prev => ({
-      ...prev,
-      users: prev.users.map(u => u.id === user.id ? {
-        ...u,
-        passwordHash: newHash,
-        failedLoginAttempts: 0,
-        lockedUntil: null
-      } : u)
-    }));
+    const res = await apiPost('recover', { username: cleanUsername, recoveryCode: authRecoveryInput.trim(), newSecret: authNewSecret });
+    if (!res.ok) {
+      setAuthError(res.error || 'Invalid recovery code.');
+      return;
+    }
     setAuthMode('login');
     setAuthSecret('');
     setAuthNewSecret('');
     setAuthRecoveryInput('');
     showToast('Password/PIN reset completed! You can now sign in.', 'success');
   };
-  const handleLogout = () => {
-    if (currentSessionToken) {
-      setDb(prev => ({
-        ...prev,
-        sessions: prev.sessions.filter(s => s.token !== currentSessionToken)
-      }));
-    }
-    try {
-      localStorage.removeItem('cloudora_active_session_token');
-    } catch {}
+
+  const handleLogout = async () => {
+    const tok = centralToken();
+    if (tok) { try { await apiPost('logout', { token: tok }); } catch {} }
+    try { localStorage.removeItem(CENTRAL_SESSION_KEY); } catch {}
     setCurrentSessionToken(null);
+    setDb(loadInitialDbState());
     setSelectedFileIds(new Set());
     setIsSelectionMode(false);
     setViewerFileId(null);
@@ -1050,32 +1021,20 @@ function App() {
 
   const enqueueFilesForUpload = useCallback((incomingFiles, targetFolderId = currentFolderId) => {
     if (!currentUser || incomingFiles.length === 0) return;
-    const chunkSizeBytes = Math.max(64 * 1024, (userSettings.chunkSizeKb || 256) * 1024);
-    const activeNode = db.storageNodes.find(n => n.isConnected) || db.storageNodes[0];
+    // Central uploads always use the server's 2 MB chunk size. The old
+    // chunkSizeKb setting is ignored for central uploads (documented).
+    const chunkSizeBytes = 2 * 1024 * 1024;
     const newSessions = incomingFiles.map(file => {
       const totalParts = Math.max(1, Math.ceil(file.size / chunkSizeBytes));
-      return {
-        id: generateId(),
-        userId: currentUser.id,
-        folderId: targetFolderId,
-        file,
-        filename: file.name,
-        mimeType: file.type || 'application/octet-stream',
-        totalBytes: file.size,
-        uploadedBytes: 0,
-        chunkSizeBytes,
-        totalParts,
-        completedParts: [],
-        storageProvider: activeNode.provider,
-        storageBucket: activeNode.bucket,
-        status: 'queued',
-        speedBytesPerSec: 0,
-        createdAt: new Date().toISOString()
-      };
+      return { id: generateId(), userId: currentUser.id, folderId: targetFolderId, file,
+        filename: file.name, mimeType: file.type || 'application/octet-stream',
+        totalBytes: file.size, uploadedBytes: 0, chunkSizeBytes, totalParts,
+        completedParts: [], serverUploadId: null, status: 'queued',
+        speedBytesPerSec: 0, createdAt: new Date().toISOString(), errorMessage: null };
     });
     setUploadQueue(prev => [...newSessions, ...prev]);
     setShowUploadSheet(true);
-  }, [currentUser, currentFolderId, userSettings.chunkSizeKb, db.storageNodes]);
+  }, [currentUser, currentFolderId]);
   useEffect(() => {
     if (!currentUser || isUploadPausedGlobal || !isOnline) return;
     const inProgressCount = uploadQueue.filter(u => u.status === 'in_progress').length;
@@ -1083,10 +1042,7 @@ function App() {
     if (inProgressCount < maxConcurrency) {
       const nextQueued = uploadQueue.find(u => u.status === 'queued');
       if (nextQueued) {
-        setUploadQueue(prev => prev.map(u => u.id === nextQueued.id ? {
-          ...u,
-          status: 'in_progress'
-        } : u));
+        setUploadQueue(prev => prev.map(u => u.id === nextQueued.id ? { ...u, status: 'in_progress' } : u));
         return;
       }
     }
@@ -1096,96 +1052,93 @@ function App() {
     const timer = setTimeout(async () => {
       for (const session of activeSessions) {
         if (cancelled) break;
+        const tok = centralToken();
+        if (!tok) break;
         try {
-          let checksum = session.sha256Checksum;
-          if (!checksum) {
-            const buffer = await session.file.arrayBuffer();
-            checksum = await sha256Hex(buffer);
-            if (userSettings.duplicateDetection) {
-              const isDup = db.files.some(f => f.userId === currentUser.id && !f.isTrashed && f.sha256Checksum === checksum);
-              if (isDup) {
-                setUploadQueue(prev => prev.map(u => u.id === session.id ? {
-                  ...u,
-                  sha256Checksum: checksum,
-                  status: 'duplicate',
-                  errorMessage: 'Duplicate SHA-256 binary skipped'
-                } : u));
-                continue;
-              }
+          let s = session;
+          // Resume: ask the server which chunks are already stored.
+          if (s.serverUploadId && s.completedParts.length === 0) {
+            const st = await apiPost('uploadStatus', { token: tok, uploadId: s.serverUploadId });
+            if (st.ok && Array.isArray(st.uploaded)) {
+              const uploadedBytes = st.uploaded.reduce((acc, idx) => acc + Math.min(s.chunkSizeBytes, s.totalBytes - idx * s.chunkSizeBytes), 0);
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, completedParts: st.uploaded.map(i => ({ partNumber: i + 1, sizeBytes: Math.min(s.chunkSizeBytes, s.totalBytes - i * s.chunkSizeBytes) })), uploadedBytes } : u));
+              s = { ...s, completedParts: st.uploaded.map(i => ({ partNumber: i + 1 })), uploadedBytes };
             }
           }
-          const nextPartNumber = session.completedParts.length + 1;
-          const startByte = (nextPartNumber - 1) * session.chunkSizeBytes;
-          const endByte = Math.min(session.totalBytes, startByte + session.chunkSizeBytes);
-          const partSize = Math.max(0, endByte - startByte);
-          const partRecord = {
-            partNumber: nextPartNumber,
-            sizeBytes: partSize,
-            etag: `"etag-${checksum.slice(0, 12)}-${nextPartNumber}"`,
-            uploadedAt: new Date().toISOString()
-          };
-          const updatedParts = [...session.completedParts, partRecord];
-          const newUploadedBytes = Math.min(session.totalBytes, endByte);
-          const simulatedSpeed = Math.max(1200000, partSize * 8 + Math.floor(Math.random() * 1500000));
-          if (updatedParts.length >= session.totalParts) {
-            const processed = await processMediaBinary(session.file);
-            const category = classifyMimeCategory(session.mimeType, session.filename);
-            const newFileRecord = {
-              id: generateId(),
-              userId: currentUser.id,
-              folderId: session.folderId,
-              filename: session.filename,
-              originalFilename: session.filename,
-              mimeType: session.mimeType,
-              category,
-              sizeBytes: session.totalBytes,
-              sha256Checksum: checksum,
-              storageProvider: session.storageProvider,
-              storageBucket: session.storageBucket,
-              objectKey: `users/${currentUser.id}/${category}/${generateId()}-${session.filename}`,
-              originalDataUrl: processed.originalDataUrl,
-              thumbnailDataUrl: processed.thumbnailDataUrl,
-              isTrashed: false,
-              capturedAt: processed.capturedAt,
-              uploadedAt: new Date().toISOString(),
-              lastViewedAt: null,
-              metadata: processed.metadata
-            };
-            setDb(prev => ({
-              ...prev,
-              files: [newFileRecord, ...prev.files]
-            }));
-            setUploadQueue(prev => prev.map(u => u.id === session.id ? {
-              ...u,
-              sha256Checksum: checksum,
-              completedParts: updatedParts,
-              uploadedBytes: session.totalBytes,
-              speedBytesPerSec: simulatedSpeed,
-              status: 'completed'
-            } : u));
-          } else {
-            setUploadQueue(prev => prev.map(u => u.id === session.id ? {
-              ...u,
-              sha256Checksum: checksum,
-              completedParts: updatedParts,
-              uploadedBytes: newUploadedBytes,
-              speedBytesPerSec: simulatedSpeed
-            } : u));
+          // First chunk: create the server upload (with real dimensions + hash).
+          if (!s.serverUploadId) {
+            let checksum = null;
+            if (userSettings.duplicateDetection) {
+              try { checksum = await sha256Hex(await s.file.arrayBuffer()); } catch {}
+            }
+            const dims = await measureMediaFile(s.file);
+            const init = await apiPost('uploadInit', { token: tok, name: s.filename, type: s.mimeType, size: s.totalBytes,
+              folderId: s.folderId, captureDate: s.file.lastModified ? new Date(s.file.lastModified).toISOString() : new Date().toISOString(),
+              width: dims.width, height: dims.height, durationSeconds: dims.durationSeconds, sha256Checksum: checksum });
+            if (!init.ok) {
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, status: 'failed', errorMessage: init.error || 'Upload rejected by server' } : u));
+              continue;
+            }
+            if (init.duplicate && init.file) {
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, status: 'duplicate', uploadedBytes: s.totalBytes, errorMessage: 'Duplicate file already on server' } : u));
+              await refreshCentral(tok);
+              continue;
+            }
+            s = { ...s, serverUploadId: init.uploadId };
+            setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, serverUploadId: init.uploadId } : u));
           }
-        } catch {
-          setUploadQueue(prev => prev.map(u => u.id === session.id ? {
-            ...u,
-            status: 'failed',
-            errorMessage: 'Upload part interrupted'
-          } : u));
+          // Upload exactly one 2 MB chunk per tick (pause/cancel stay responsive).
+          const doneIdx = new Set(s.completedParts.map(pr => pr.partNumber - 1));
+          let nextIdx = -1;
+          for (let i = 0; i < s.totalParts; i++) { if (!doneIdx.has(i)) { nextIdx = i; break; } }
+          if (nextIdx < 0) {
+            const done = await apiPost('uploadComplete', { token: tok, uploadId: s.serverUploadId });
+            if (!done.ok) {
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, status: 'failed', errorMessage: done.error || 'Upload completion failed' } : u));
+            } else {
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, status: 'completed', uploadedBytes: s.totalBytes } : u));
+              await refreshCentral(tok);
+            }
+            continue;
+          }
+          const startByte = nextIdx * s.chunkSizeBytes;
+          const endByte = Math.min(s.totalBytes, startByte + s.chunkSizeBytes);
+          const slice = s.file.slice(startByte, endByte);
+          const buf = await slice.arrayBuffer();
+          const b64 = await new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(new Blob([buf]));
+          });
+          const t0 = Date.now();
+          const chunkRes = await apiPost('uploadChunk', { token: tok, uploadId: s.serverUploadId, index: nextIdx, dataBase64: b64 });
+          const elapsed = Math.max(0.05, (Date.now() - t0) / 1000);
+          if (!chunkRes.ok) {
+            setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, status: 'failed', errorMessage: chunkRes.error || 'Chunk upload failed' } : u));
+            continue;
+          }
+          const chunkBytes = endByte - startByte;
+          const newUploaded = Math.min(s.totalBytes, s.uploadedBytes + chunkBytes);
+          const newParts = [...s.completedParts, { partNumber: nextIdx + 1, sizeBytes: chunkBytes }];
+          if (newParts.length >= s.totalParts) {
+            const done = await apiPost('uploadComplete', { token: tok, uploadId: s.serverUploadId });
+            if (!done.ok) {
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, completedParts: newParts, uploadedBytes: newUploaded, status: 'failed', errorMessage: done.error || 'Upload completion failed' } : u));
+            } else {
+              setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, completedParts: newParts, uploadedBytes: s.totalBytes, speedBytesPerSec: Math.round(chunkBytes / elapsed), status: 'completed' } : u));
+              await refreshCentral(tok);
+            }
+          } else {
+            setUploadQueue(prev => prev.map(u => u.id === s.id ? { ...u, completedParts: newParts, uploadedBytes: newUploaded, speedBytesPerSec: Math.round(chunkBytes / elapsed) } : u));
+          }
+        } catch (err) {
+          setUploadQueue(prev => prev.map(u => u.id === session.id ? { ...u, status: 'failed', errorMessage: 'Upload interrupted' } : u));
         }
       }
     }, 65);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [uploadQueue, currentUser, isUploadPausedGlobal, isOnline, userSettings.uploadConcurrency, userSettings.duplicateDetection, db.files]);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [uploadQueue, currentUser, isUploadPausedGlobal, isOnline, userSettings.uploadConcurrency, userSettings.duplicateDetection]);
   const uploadSummary = useMemo(() => {
     const totalFiles = uploadQueue.length;
     const completedFiles = uploadQueue.filter(u => u.status === 'completed' || u.status === 'duplicate').length;
@@ -1322,147 +1275,100 @@ function App() {
   // FILE ACTIONS
   // ============================================================================
 
-  const toggleFavourite = useCallback((fileId, e) => {
+  const toggleFavourite = useCallback(async (fileId, e) => {
     if (e) e.stopPropagation();
     if (!currentUser) return;
     const isFav = userFavouriteIds.has(fileId);
-    setDb(prev => {
-      if (isFav) {
-        return {
-          ...prev,
-          favourites: prev.favourites.filter(f => !(f.userId === currentUser.id && f.fileId === fileId))
-        };
-      }
-      return {
-        ...prev,
-        favourites: [...prev.favourites, {
-          id: generateId(),
-          userId: currentUser.id,
-          fileId,
-          createdAt: new Date().toISOString()
-        }]
-      };
-    });
+    const tok = centralToken();
+    if (!tok) return;
+    const res = await apiPost('favourite', { token: tok, fileId });
+    if (!res.ok) { showToast(res.error || 'Favourite update failed.', 'error'); return; }
+    await refreshCentral(tok);
     showToast(isFav ? 'Removed from Favourites' : 'Added to Favourites', 'info');
   }, [currentUser, userFavouriteIds, showToast]);
-  const downloadSingleFileOriginal = useCallback(file => {
-    if (!file.originalDataUrl) {
-      showToast('Original binary unavailable for this virtual benchmark record.', 'warning');
-      return;
-    }
-    const a = document.createElement('a');
-    a.href = file.originalDataUrl;
-    a.download = file.originalFilename || file.filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    logActivity('DOWNLOAD_ORIGINAL', `Downloaded original ${file.filename} (${formatBytes(file.sizeBytes)})`);
-    showToast(`Downloading original ${file.filename} (${formatBytes(file.sizeBytes)})`, 'success');
-  }, [logActivity, showToast]);
-  const downloadMultipleAsZip = useCallback((filesToZip, archiveName = 'Cloudora_Original_Archive.zip') => {
-    const validFiles = filesToZip.filter(f => Boolean(f.originalDataUrl));
-    if (validFiles.length === 0) {
+
+  const downloadSingleFileOriginal = useCallback(async file => {
+    const tok = centralToken();
+    if (!tok) { showToast('Please sign in again.', 'error'); return; }
+    try {
+      const res = await fetch(centralDownloadUrl(file.id, tok) + '&dl=1');
+      if (!res.ok) { showToast('Download failed (server ' + res.status + ').', 'error'); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = file.originalFilename || file.filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast(`Downloading original ${file.filename} (${formatBytes(file.sizeBytes)})`, 'success');
+    } catch { showToast('Download failed.', 'error'); }
+  }, [showToast]);
+
+  const downloadMultipleAsZip = useCallback(async (filesToZip, archiveName = 'Cloudora_Original_Archive.zip') => {
+    if (!filesToZip || filesToZip.length === 0) {
       showToast('Select at least one uploaded file to build a ZIP archive.', 'warning');
       return;
     }
-    const zipBlob = createZipBlob(validFiles.map(f => ({
-      name: f.originalFilename || f.filename,
-      dataUrl: f.originalDataUrl
-    })));
-    const url = URL.createObjectURL(zipBlob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = archiveName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-    logActivity('DOWNLOAD_ZIP', `Downloaded ${validFiles.length} files as ${archiveName} (${formatBytes(zipBlob.size)})`);
-    showToast(`Created & downloaded ${archiveName} (${validFiles.length} files)`, 'success');
-  }, [logActivity, showToast]);
-  const moveFilesToTrash = useCallback(fileIds => {
+    const tok = centralToken();
+    if (!tok) { showToast('Please sign in again.', 'error'); return; }
+    try {
+      const entries = [];
+      for (const f of filesToZip) {
+        const res = await fetch(centralDownloadUrl(f.id, tok));
+        if (!res.ok) continue;
+        const buf = await res.arrayBuffer();
+        let binary = ''; const bytes = new Uint8Array(buf);
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        entries.push({ name: f.originalFilename || f.filename, dataUrl: 'data:application/octet-stream;base64,' + btoa(binary) });
+      }
+      if (entries.length === 0) { showToast('No files could be downloaded for the ZIP.', 'error'); return; }
+      const zipBlob = createZipBlob(entries);
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a'); a.href = url; a.download = archiveName;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      showToast(`Created & downloaded ${archiveName} (${entries.length} files)`, 'success');
+    } catch { showToast('ZIP download failed.', 'error'); }
+  }, [showToast]);
+
+  const moveFilesToTrash = useCallback(async fileIds => {
     if (!currentUser || fileIds.length === 0) return;
     const idSet = new Set(fileIds);
-    const now = new Date();
-    const purgeDate = new Date(now.getTime() + 30 * 86400000);
-    setDb(prev => {
-      const newTrashEntries = prev.files.filter(f => f.userId === currentUser.id && idSet.has(f.id) && !f.isTrashed).map(f => ({
-        id: generateId(),
-        userId: currentUser.id,
-        fileId: f.id,
-        originalFolderId: f.folderId,
-        deletedAt: now.toISOString(),
-        autoPurgeAt: purgeDate.toISOString()
-      }));
-      return {
-        ...prev,
-        files: prev.files.map(f => f.userId === currentUser.id && idSet.has(f.id) ? {
-          ...f,
-          isTrashed: true
-        } : f),
-        trash: [...newTrashEntries, ...prev.trash]
-      };
-    });
-    setSelectedFileIds(new Set());
-    setIsSelectionMode(false);
+    const tok = centralToken(); if (!tok) return;
+    await apiPost('trashFile', { token: tok, fileIds });
+    await refreshCentral(tok);
+    setSelectedFileIds(new Set()); setIsSelectionMode(false);
     if (viewerFileId && idSet.has(viewerFileId)) setViewerFileId(null);
-    logActivity('MOVE_TO_TRASH', `Moved ${fileIds.length} item(s) to Trash`);
     showToast(`Moved ${fileIds.length} item(s) to Trash`, 'info');
-  }, [currentUser, viewerFileId, logActivity, showToast]);
-  const restoreFromTrash = useCallback(fileIds => {
+  }, [currentUser, viewerFileId, showToast]);
+
+  const restoreFromTrash = useCallback(async fileIds => {
     if (!currentUser || fileIds.length === 0) return;
-    const idSet = new Set(fileIds);
-    setDb(prev => ({
-      ...prev,
-      files: prev.files.map(f => f.userId === currentUser.id && idSet.has(f.id) ? {
-        ...f,
-        isTrashed: false
-      } : f),
-      trash: prev.trash.filter(t => !(t.userId === currentUser.id && idSet.has(t.fileId)))
-    }));
-    logActivity('RESTORE_FROM_TRASH', `Restored ${fileIds.length} item(s) from Trash`);
+    const tok = centralToken(); if (!tok) return;
+    await apiPost('restoreTrash', { token: tok, fileIds });
+    await refreshCentral(tok);
     showToast(`Restored ${fileIds.length} item(s) to gallery`, 'success');
-  }, [currentUser, logActivity, showToast]);
-  const permanentlyDeleteFiles = useCallback(fileIds => {
+  }, [currentUser, showToast]);
+
+  const permanentlyDeleteFiles = useCallback(async fileIds => {
     if (!currentUser || fileIds.length === 0) return;
-    const idSet = new Set(fileIds);
-    setDb(prev => ({
-      ...prev,
-      files: prev.files.filter(f => !(f.userId === currentUser.id && idSet.has(f.id))),
-      trash: prev.trash.filter(t => !(t.userId === currentUser.id && idSet.has(t.fileId))),
-      favourites: prev.favourites.filter(fav => !(fav.userId === currentUser.id && idSet.has(fav.fileId))),
-      sharedLinks: prev.sharedLinks.filter(sl => !(sl.userId === currentUser.id && idSet.has(sl.fileId)))
-    }));
-    logActivity('PERMANENT_DELETE', `Permanently deleted ${fileIds.length} item(s) and freed storage`);
+    const tok = centralToken(); if (!tok) return;
+    await apiPost('deletePermanent', { token: tok, fileIds });
+    await refreshCentral(tok);
     showToast(`Permanently deleted ${fileIds.length} item(s)`, 'warning');
-  }, [currentUser, logActivity, showToast]);
+  }, [currentUser, showToast]);
+
   const handleCreateShareLink = async () => {
     if (!currentUser || !shareModalFileId) return;
-    const token = `cld_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 8)}`;
-    const passHash = sharePasswordInput.trim() ? await hashSecretWithSalt(sharePasswordInput.trim(), currentUser.salt) : null;
-    const days = Number(shareExpiryDays);
-    const expiresAt = days > 0 ? new Date(Date.now() + days * 86400000).toISOString() : null;
-    const newLink = {
-      id: generateId(),
-      userId: currentUser.id,
-      fileId: shareModalFileId,
-      shareToken: token,
-      passwordHash: passHash,
-      hasPassword: Boolean(passHash),
-      allowDownload: shareAllowDownload,
-      isActive: true,
-      expiresAt,
-      accessCount: 0,
-      createdAt: new Date().toISOString()
-    };
-    setDb(prev => ({
-      ...prev,
-      sharedLinks: [newLink, ...prev.sharedLinks]
-    }));
+    const tok = centralToken(); if (!tok) return;
+    const res = await apiPost('shareCreate', { token: tok, fileId: shareModalFileId,
+      password: sharePasswordInput.trim() ? sharePasswordInput.trim() : null,
+      expiryDays: Number(shareExpiryDays) || 0, allowDownload: shareAllowDownload });
+    if (!res.ok) { showToast(res.error || 'Share link failed.', 'error'); return; }
+    await refreshCentral(tok);
     setSharePasswordInput('');
-    logActivity('CREATE_SHARE_LINK', `Generated secure share link (${token})`, 'File Shared', 'info');
     showToast('Secure share link created!', 'success');
   };
+
   const copyTextSafe = (text, label = 'Link copied to clipboard!') => {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).catch(() => {});
@@ -1579,6 +1485,10 @@ function App() {
 
   const isDark = userSettings.theme === 'dark';
   if (!currentUser) {
+    try {
+      const shareId = new URLSearchParams(window.location.search).get('share');
+      if (shareId) return React.createElement(ShareScreen, { shareId });
+    } catch {}
     return /*#__PURE__*/React.createElement("div", {
       className: "min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col justify-center items-center p-4 font-sans selection:bg-cyan-500 selection:text-slate-950"
     }, /*#__PURE__*/React.createElement("div", {
@@ -1794,7 +1704,7 @@ function App() {
       className: "flex items-center gap-1"
     }, /*#__PURE__*/React.createElement(HardDrive, {
       className: "w-3.5 h-3.5 text-cyan-400"
-    }), " R2 + IndexedDB Ready"))));
+    }), " Central Vercel Blob • 1 GB free limit"))));
   }
 
   // ============================================================================
@@ -1854,7 +1764,7 @@ function App() {
     type: "button",
     onClick: () => setShowStorageOnly(true),
     className: "text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-400 font-semibold border border-cyan-500/30 cursor-pointer"
-  }, "R2 CLOUD")), /*#__PURE__*/React.createElement("p", {
+  }, "CENTRAL")), /*#__PURE__*/React.createElement("p", {
     className: "text-[10px] text-slate-400 leading-none"
   }, formatBytes(storageStats.usedBytes), " used • @", currentUser.username))), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-1.5"
@@ -2031,11 +1941,11 @@ function App() {
     className: "w-5 h-5 text-cyan-400"
   }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
     className: "text-sm font-bold"
-  }, "Expandable Cloud Storage"), /*#__PURE__*/React.createElement("p", {
+  }, "Central Cloud Storage"), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-slate-400"
-  }, db.storageNodes.filter(n => n.isConnected).length, " storage nodes connected"))), /*#__PURE__*/React.createElement("button", {
+  }, db.storageNodes.filter(n => n.isConnected).length, " central store connected"))), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => setShowAddStorageModal(true),
+    onClick: () => showToast('Central storage is the free 1 GB Vercel Blob plan. It cannot be expanded from here; a provider upgrade would be needed.', 'warning'),
     className: "px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 text-xs font-semibold hover:bg-cyan-500/25"
   }, "+ Expand Node")), /*#__PURE__*/React.createElement("div", {
     className: "w-full h-2 rounded-full bg-slate-800 overflow-hidden my-2"
@@ -2144,7 +2054,7 @@ function App() {
     className: "absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[10px] font-semibold flex items-center gap-0.5"
   }, /*#__PURE__*/React.createElement(Play, {
     className: "w-2.5 h-2.5 fill-white"
-  }), /*#__PURE__*/React.createElement("span", null, file.metadata.durationSeconds || 4, "s"))))))), (activeTab === 'photos' || activeTab === 'favourites') && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("span", null, file.metadata.durationSeconds ? file.metadata.durationSeconds + "s" : ""))))))), (activeTab === 'photos' || activeTab === 'favourites') && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "px-3.5 py-2 flex items-center justify-between border-b border-slate-800/60 text-xs"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-2"
@@ -2239,7 +2149,7 @@ function App() {
       className: "absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[10px] font-semibold flex items-center gap-1"
     }, /*#__PURE__*/React.createElement(Play, {
       className: "w-2.5 h-2.5 fill-white"
-    }), /*#__PURE__*/React.createElement("span", null, file.metadata.durationSeconds || 4, "s")), (userSettings.showFilenames || userSettings.showFileSizes) && /*#__PURE__*/React.createElement("div", {
+    }), /*#__PURE__*/React.createElement("span", null, file.metadata.durationSeconds ? file.metadata.durationSeconds + "s" : "")), (userSettings.showFilenames || userSettings.showFileSizes) && /*#__PURE__*/React.createElement("div", {
       className: "absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/85 via-black/50 to-transparent p-1.5 text-[10px] text-white truncate"
     }, userSettings.showFilenames && /*#__PURE__*/React.createElement("div", {
       className: "truncate font-medium"
@@ -2515,7 +2425,7 @@ function App() {
     className: "px-3 py-1.5 rounded-xl bg-slate-800 text-xs font-semibold text-cyan-300"
   }, "Profile")), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-2 gap-2"
-  }, [['profile', 'My Profile', User], ['account', 'My Account', Shield], ['all_photos', `All Photos (${storageStats.photosCount})`, ImageIcon], ['all_videos', `All Videos (${storageStats.videosCount})`, Film], ['all_files', `All Files (${storageStats.filesCount})`, Folder], ['favourites', `Favourites (${userFavouriteIds.size})`, Heart], ['recently_added', 'Recently Added', Clock], ['recently_viewed', 'Recently Viewed', Eye], ['shared_files', `Shared Files (${userSharedFileIds.size})`, Share2], ['trash', `Trash (${userTrashedFiles.length})`, Trash2], ['storage_usage', 'Storage Usage', HardDrive], ['settings', 'Settings', SettingsIcon], ['test_suite', '23-Point Verification', Activity], ['help', 'Help & Support', HelpCircle], ['privacy', 'Privacy Policy', Lock], ['terms', 'Terms & Conditions', BookOpen]].map(([scr, label, Icon]) => /*#__PURE__*/React.createElement("button", {
+  }, [['profile', 'My Profile', User], ['account', 'My Account', Shield], ['all_photos', `All Photos (${storageStats.photosCount})`, ImageIcon], ['all_videos', `All Videos (${storageStats.videosCount})`, Film], ['all_files', `All Files (${storageStats.filesCount})`, Folder], ['favourites', `Favourites (${userFavouriteIds.size})`, Heart], ['recently_added', 'Recently Added', Clock], ['recently_viewed', 'Recently Viewed', Eye], ['shared_files', `Shared Files (${userSharedFileIds.size})`, Share2], ['trash', `Trash (${userTrashedFiles.length})`, Trash2], ['storage_usage', 'Storage Usage', HardDrive], ['settings', 'Settings', SettingsIcon], ['help', 'Help & Support', HelpCircle], ['privacy', 'Privacy Policy', Lock], ['terms', 'Terms & Conditions', BookOpen]].map(([scr, label, Icon]) => /*#__PURE__*/React.createElement("button", {
     key: scr,
     type: "button",
     onClick: () => setMenuScreen(scr),
@@ -2608,7 +2518,7 @@ function App() {
     className: "p-6 text-center rounded-xl border border-dashed border-slate-800 text-xs text-slate-400"
   }, "No active shared links. Open any file and tap Share to generate a password-protected or expiring link.") : db.sharedLinks.filter(sl => sl.userId === currentUser.id).map(link => {
     const file = userFilesAll.find(f => f.id === link.fileId);
-    const shareUrl = `https://cloudora.pages.dev/s/${link.shareToken}`;
+    const shareUrl = `${window.location.origin}/?share=${link.id}`;
     return /*#__PURE__*/React.createElement("div", {
       key: link.id,
       className: `p-3.5 rounded-xl border space-y-2 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-slate-50 border-slate-200'}`
@@ -2638,14 +2548,10 @@ function App() {
       className: "px-2.5 py-1 rounded-lg bg-slate-800 text-cyan-300 text-xs"
     }, "Test Recipient View"), link.isActive && /*#__PURE__*/React.createElement("button", {
       type: "button",
-      onClick: () => {
-        setDb(prev => ({
-          ...prev,
-          sharedLinks: prev.sharedLinks.map(s => s.id === link.id ? {
-            ...s,
-            isActive: false
-          } : s)
-        }));
+      onClick: async () => {
+        const tok = centralToken(); if (!tok) return;
+        await apiPost('shareRevoke', { token: tok, shareId: link.id });
+        await refreshCentral(tok);
         showToast('Share link revoked.', 'warning');
       },
       className: "px-2.5 py-1 rounded-lg bg-rose-500/20 text-rose-300 text-xs"
@@ -2712,11 +2618,11 @@ function App() {
     className: "text-sm font-bold"
   }, "Real Provisioned Storage Dashboard"), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => setShowAddStorageModal(true),
+    onClick: () => showToast('Central storage is the free 1 GB Vercel Blob plan. It cannot be expanded from here; a provider upgrade would be needed.', 'warning'),
     className: "px-2.5 py-1 rounded-lg bg-cyan-500 text-slate-950 font-bold text-xs"
   }, "+ Add Bucket")), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-slate-400 mb-3"
-  }, "Scales with your connected Cloudflare R2, S3, and device storage providers with zero artificial limits."), /*#__PURE__*/React.createElement("div", {
+  }, "Central storage is one Vercel Blob store on the free 1 GB plan. Uploads stop at the limit until the month resets; there is no unlimited storage."), /*#__PURE__*/React.createElement("div", {
     className: "space-y-1.5 text-xs"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex justify-between"
@@ -2778,13 +2684,7 @@ function App() {
   }, "Capacity:", ' ', node.provider === 'indexeddb-local' ? formatBytes(browserQuotaBytes) : formatBytes(node.provisionedBytes))), /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => {
-      setDb(prev => ({
-        ...prev,
-        storageNodes: prev.storageNodes.map(n => n.id === node.id ? {
-          ...n,
-          isConnected: !n.isConnected
-        } : n)
-      }));
+      showToast('The central store is always connected and cannot be paused from here.', 'info');
     },
     className: `px-2.5 py-1 rounded-lg text-[10px] font-bold ${node.isConnected ? 'bg-teal-500/20 text-teal-300' : 'bg-slate-800 text-slate-400'}`
   }, node.isConnected ? 'Connected' : 'Paused'))))), menuScreen === 'settings' && /*#__PURE__*/React.createElement("div", {
@@ -2833,7 +2733,7 @@ function App() {
     value: 3
   }, "3 parallel streams"), /*#__PURE__*/React.createElement("option", {
     value: 6
-  }, "6 parallel streams"))))), menuScreen === 'test_suite' && /*#__PURE__*/React.createElement("div", {
+  }, "6 parallel streams"))))), false && menuScreen === 'test_suite' && /*#__PURE__*/React.createElement("div", {
     className: "space-y-3"
   }, /*#__PURE__*/React.createElement("div", {
     className: "p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-2.5"
@@ -2853,9 +2753,7 @@ function App() {
   }, /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => {
-      setVirtualStressCount(50000);
-      setActiveTab('photos');
-      showToast('50,000-record virtualized gallery benchmark enabled!', 'success');
+      showToast('The 50,000-record virtual benchmark was removed: the gallery shows only real server files.', 'warning');
     },
     className: "px-3 py-1.5 rounded-lg bg-slate-800 text-cyan-300 text-xs font-semibold border border-cyan-500/30"
   }, "Launch 50,000-Record Gallery Benchmark"))), /*#__PURE__*/React.createElement("div", {
@@ -2878,7 +2776,7 @@ function App() {
     className: "p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-2 text-xs text-slate-300"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-bold text-white uppercase"
-  }, menuScreen), /*#__PURE__*/React.createElement("p", null, "CLOUDORA provides private, user-isolated personal cloud storage backed by S3-compatible object buckets (Cloudflare R2) and encrypted database metadata."), /*#__PURE__*/React.createElement("p", null, "All original photos and videos remain unmodified during upload, with separate thumbnails generated for fast 3-column Android gallery browsing.")))), /*#__PURE__*/React.createElement("button", {
+  }, menuScreen), /*#__PURE__*/React.createElement("p", null, "CLOUDORA provides private, user-isolated personal cloud storage on a central Vercel Blob store (1 GB free limit). Passwords are stored only as PBKDF2 hashes, never in plain text."), /*#__PURE__*/React.createElement("p", null, "All original photos and videos remain unmodified during upload. Previews load from the central server; originals are downloaded unchanged.")))), /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => setShowUploadSheet(true),
     title: "Upload Photos, Videos & Files",
@@ -3030,7 +2928,7 @@ function App() {
     className: "w-3.5 h-3.5"
   }), /*#__PURE__*/React.createElement("span", null, videoPlaying ? 'Pause' : 'Play')), /*#__PURE__*/React.createElement("span", {
     className: "text-slate-400"
-  }, activeViewerFile.metadata.resolution || '1920×1080', " •", ' ', activeViewerFile.metadata.durationSeconds || 4, "s")), /*#__PURE__*/React.createElement("select", {
+  }, (activeViewerFile.metadata.width && activeViewerFile.metadata.height ? activeViewerFile.metadata.width + '×' + activeViewerFile.metadata.height : 'Unknown size'), " •", ' ', activeViewerFile.metadata.durationSeconds ? activeViewerFile.metadata.durationSeconds + 's' : '')), /*#__PURE__*/React.createElement("select", {
     value: videoSpeed,
     onChange: e => {
       const spd = Number(e.target.value);
@@ -3227,7 +3125,11 @@ function App() {
     className: "w-3 h-3"
   }), /*#__PURE__*/React.createElement("span", null, "Retry Failed")), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => setUploadQueue([]),
+    onClick: () => {
+      const tok = centralToken();
+      if (tok) for (const it of uploadQueue) if (it.serverUploadId && it.status !== 'completed' && it.status !== 'duplicate') apiPost('cancelUpload', { token: tok, uploadId: it.serverUploadId }).catch(() => {});
+      setUploadQueue([]);
+    },
     className: "px-2.5 py-1 rounded-lg bg-slate-800 text-slate-400 hover:text-white ml-auto"
   }, "Clear Finished"))), /*#__PURE__*/React.createElement("div", {
     className: "flex-1 overflow-y-auto space-y-1.5 pr-1"
@@ -3269,10 +3171,11 @@ function App() {
       className: "text-cyan-400 hover:underline"
     }, "Resume"), item.status !== 'completed' && /*#__PURE__*/React.createElement("button", {
       type: "button",
-      onClick: () => setUploadQueue(prev => prev.map(u => u.id === item.id ? {
-        ...u,
-        status: 'cancelled'
-      } : u)),
+      onClick: () => {
+        const tok = centralToken();
+        if (tok && item.serverUploadId) apiPost('cancelUpload', { token: tok, uploadId: item.serverUploadId }).catch(() => {});
+        setUploadQueue(prev => prev.map(u => u.id === item.id ? { ...u, status: 'cancelled' } : u));
+      },
       className: "text-rose-400 hover:underline"
     }, "Cancel"))));
   })))), shareModalFileId && /*#__PURE__*/React.createElement("div", {
@@ -3338,7 +3241,7 @@ function App() {
     },
     className: "px-3 py-2.5 rounded-xl bg-slate-800 text-cyan-300 font-semibold text-xs"
   }, "Android Share")), db.sharedLinks.filter(sl => sl.fileId === shareModalFileId && sl.isActive).map(sl => {
-    const url = `https://cloudora.pages.dev/s/${sl.shareToken}`;
+    const url = `${window.location.origin}/?share=${sl.id}`;
     return /*#__PURE__*/React.createElement("div", {
       key: sl.id,
       className: "p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-[11px] space-y-1.5"
@@ -3386,11 +3289,11 @@ function App() {
   }), /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: async () => {
-      const h = await hashSecretWithSalt(recipientPasswordAttempt.trim(), currentUser.salt);
-      if (h === recipientPreviewLink.passwordHash) {
+      const res = await apiPost('shareInfo', { shareId: recipientPreviewLink.id, password: recipientPasswordAttempt.trim() });
+      if (res.ok) {
         setRecipientUnlocked(true);
       } else {
-        showToast('Incorrect link password.', 'error');
+        showToast(res.error || 'Incorrect link password.', 'error');
       }
     },
     className: "w-full py-2.5 rounded-xl bg-cyan-500 text-slate-950 font-bold"
@@ -3436,19 +3339,12 @@ function App() {
     className: "px-3 py-1.5 rounded-lg bg-slate-800 text-xs"
   }, "Cancel"), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => {
+    onClick: async () => {
       if (!newFolderName.trim()) return;
-      setDb(prev => ({
-        ...prev,
-        folders: [...prev.folders, {
-          id: generateId(),
-          userId: currentUser.id,
-          parentId: currentFolderId,
-          name: newFolderName.trim(),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        }]
-      }));
+      const tok = centralToken(); if (!tok) return;
+      const res = await apiPost('createFolder', { token: tok, name: newFolderName.trim(), parentId: currentFolderId });
+      if (!res.ok) { showToast(res.error || 'Folder creation failed.', 'error'); return; }
+      await refreshCentral(tok);
       setNewFolderName('');
       setShowNewFolderModal(false);
       showToast('Folder created!', 'success');
@@ -3473,15 +3369,12 @@ function App() {
     className: "px-3 py-1.5 rounded-lg bg-slate-800 text-xs"
   }, "Cancel"), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => {
+    onClick: async () => {
       if (!renameValue.trim()) return;
-      setDb(prev => ({
-        ...prev,
-        files: prev.files.map(f => f.id === renameTargetFileId ? {
-          ...f,
-          filename: renameValue.trim()
-        } : f)
-      }));
+      const tok = centralToken(); if (!tok) return;
+      const res = await apiPost('renameFile', { token: tok, fileId: renameTargetFileId, name: renameValue.trim() });
+      if (!res.ok) { showToast(res.error || 'Rename failed.', 'error'); return; }
+      await refreshCentral(tok);
       setRenameTargetFileId(null);
       showToast('File renamed!', 'success');
     },
@@ -3496,15 +3389,10 @@ function App() {
     className: "space-y-1.5 max-h-48 overflow-y-auto"
   }, /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => {
-      const idSet = new Set(moveTargetFileIds);
-      setDb(prev => ({
-        ...prev,
-        files: prev.files.map(f => idSet.has(f.id) ? {
-          ...f,
-          folderId: null
-        } : f)
-      }));
+    onClick: async () => {
+      const tok = centralToken(); if (!tok) return;
+      for (const id of moveTargetFileIds) await apiPost('moveFile', { token: tok, fileId: id, folderId: null });
+      await refreshCentral(tok);
       setMoveTargetFileIds([]);
       showToast('Moved to Root Vault', 'success');
     },
@@ -3512,15 +3400,10 @@ function App() {
   }, "📁 Root Vault"), userFolders.map(fl => /*#__PURE__*/React.createElement("button", {
     key: fl.id,
     type: "button",
-    onClick: () => {
-      const idSet = new Set(moveTargetFileIds);
-      setDb(prev => ({
-        ...prev,
-        files: prev.files.map(f => idSet.has(f.id) ? {
-          ...f,
-          folderId: fl.id
-        } : f)
-      }));
+    onClick: async () => {
+      const tok = centralToken(); if (!tok) return;
+      for (const id of moveTargetFileIds) await apiPost('moveFile', { token: tok, fileId: id, folderId: fl.id });
+      await refreshCentral(tok);
       setMoveTargetFileIds([]);
       showToast(`Moved to ${fl.name}`, 'success');
     },
@@ -3586,27 +3469,8 @@ function App() {
   }))), /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => {
-      if (!newNodeName.trim() || !newNodeBucket.trim()) return;
-      const tb = Math.max(1, Number(newNodeCapacityTb) || 1);
-      const node = {
-        id: generateId(),
-        name: newNodeName.trim(),
-        provider: newNodeProvider,
-        bucket: newNodeBucket.trim(),
-        endpoint: newNodeEndpoint.trim() || 'https://s3.compatible.endpoint',
-        region: 'auto',
-        provisionedBytes: tb * 1099511627776,
-        isConnected: true,
-        addedAt: new Date().toISOString()
-      };
-      setDb(prev => ({
-        ...prev,
-        storageNodes: [...prev.storageNodes, node]
-      }));
-      setNewNodeName('');
-      setNewNodeBucket('');
       setShowAddStorageModal(false);
-      showToast(`Expanded cloud storage by +${tb} TB!`, 'success');
+      showToast('Storage expansion is not available on the free 1 GB central plan. No extra storage was added.', 'warning');
     },
     className: "w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-teal-500 text-slate-950 font-bold text-xs"
   }, "Attach Storage Bucket"))), showNotificationsDrawer && /*#__PURE__*/React.createElement("div", {
