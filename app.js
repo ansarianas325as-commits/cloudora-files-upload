@@ -1635,7 +1635,7 @@ function App() {
     }, "Full Name"), /*#__PURE__*/React.createElement("input", {
       type: "text",
       required: true,
-      placeholder: "e.g. Aarav Sharma",
+      placeholder: "Ansari Anas",
       value: authFullName,
       onChange: e => setAuthFullName(e.target.value),
       className: "w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
@@ -1648,7 +1648,7 @@ function App() {
     }, "@"), /*#__PURE__*/React.createElement("input", {
       type: "text",
       required: true,
-      placeholder: "aarav_cloud",
+      placeholder: "ansari_anas",
       value: authUsername,
       onChange: e => setAuthUsername(e.target.value),
       className: "w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
@@ -1697,7 +1697,7 @@ function App() {
     }, "@"), /*#__PURE__*/React.createElement("input", {
       type: "text",
       required: true,
-      placeholder: "your_username",
+      placeholder: "ansari_anas",
       value: authUsername,
       onChange: e => setAuthUsername(e.target.value),
       className: "w-full pl-8 pr-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
@@ -1744,7 +1744,7 @@ function App() {
     }, "Username"), /*#__PURE__*/React.createElement("input", {
       type: "text",
       required: true,
-      placeholder: "your_username",
+      placeholder: "ansari_anas",
       value: authUsername,
       onChange: e => setAuthUsername(e.target.value),
       className: "w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
