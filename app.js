@@ -599,6 +599,7 @@ function App() {
 
   // Navigation & View State
   const [activeTab, setActiveTab] = useState('photos');
+  const [showStorageOnly, setShowStorageOnly] = useState(false);
   const [menuScreen, setMenuScreen] = useState('main');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState('all');
@@ -1849,8 +1850,10 @@ function App() {
     className: "flex items-center gap-1.5"
   }, /*#__PURE__*/React.createElement("span", {
     className: "font-extrabold text-sm tracking-tight"
-  }, "CLOUDORA"), /*#__PURE__*/React.createElement("span", {
-    className: "text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-400 font-semibold border border-cyan-500/30"
+  }, "CLOUDORA"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setShowStorageOnly(true),
+    className: "text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-400 font-semibold border border-cyan-500/30 cursor-pointer"
   }, "R2 CLOUD")), /*#__PURE__*/React.createElement("p", {
     className: "text-[10px] text-slate-400 leading-none"
   }, formatBytes(storageStats.usedBytes), " used • @", currentUser.username))), /*#__PURE__*/React.createElement("div", {
@@ -2014,7 +2017,11 @@ function App() {
     className: "flex-1 pb-24 overflow-y-auto overflow-x-hidden"
   }, activeTab === 'home' && /*#__PURE__*/React.createElement("div", {
     className: "p-3.5 space-y-4"
-  }, /*#__PURE__*/React.createElement("div", {
+  }, showStorageOnly ? /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setShowStorageOnly(false),
+    className: "px-3 py-2 rounded-xl bg-slate-800 text-cyan-300 font-semibold text-xs"
+  }, "← Back to Home") : null, /*#__PURE__*/React.createElement("div", {
     className: `p-4 rounded-2xl border relative overflow-hidden ${isDark ? 'bg-gradient-to-br from-slate-900 via-[#0F172A] to-cyan-950/40 border-slate-800' : 'bg-slate-50 border-slate-200'}`
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-2"
@@ -2061,7 +2068,7 @@ function App() {
     className: "text-xs font-bold text-purple-400"
   }, userFavouriteIds.size), /*#__PURE__*/React.createElement("p", {
     className: "text-[10px] text-slate-400"
-  }, "Favourites")))), /*#__PURE__*/React.createElement("div", {
+  }, "Favourites")))), /*#__PURE__*/!showStorageOnly && React.createElement("div", {
     className: `p-3.5 rounded-2xl border ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200'}`
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-2.5"
@@ -2095,7 +2102,7 @@ function App() {
     className: "p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-purple-300 font-semibold text-xs flex items-center justify-center gap-1.5 border border-slate-700"
   }, /*#__PURE__*/React.createElement(Film, {
     className: "w-4 h-4 text-purple-400"
-  }), /*#__PURE__*/React.createElement("span", null, "+1 Sample Video")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("span", null, "+1 Sample Video")))), /*#__PURE__*/!showStorageOnly && React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-2"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-xs font-bold uppercase tracking-wider text-slate-400"
@@ -2163,17 +2170,13 @@ function App() {
     className: "text-sm font-bold mb-1"
   }, activeTab === 'favourites' ? 'No Favourite Memories Yet' : 'No Media in Gallery'), /*#__PURE__*/React.createElement("p", {
     className: "text-xs text-slate-400 max-w-xs mx-auto mb-4"
-  }, activeTab === 'favourites' ? 'Tap the heart icon on any photo, video, or file to save it to your Favourites.' : 'Upload photos and videos from your device, or generate a real binary test batch below.'), activeTab === 'photos' && /*#__PURE__*/React.createElement("div", {
+  }, activeTab === 'favourites' ? 'Tap the heart icon on any photo, video, or file to save it to your Favourites.' : 'Upload photos and videos from your device.'), activeTab === 'photos' && /*#__PURE__*/React.createElement("div", {
     className: "flex flex-wrap justify-center gap-2"
   }, /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => uploadInputRef.current?.click(),
     className: "px-4 py-2 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs"
-  }, "Upload from Device"), /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    onClick: () => handleSynthesizeAndUploadBatch(9, 'photo'),
-    className: "px-4 py-2 rounded-xl bg-slate-800 text-cyan-300 border border-slate-700 font-semibold text-xs"
-  }, "Generate 9 Real Test Photos"))) : userSettings.galleryLayout === 'grid' ? /*#__PURE__*/React.createElement("div", {
+  }, "Upload from Device"))) : userSettings.galleryLayout === 'grid' ? /*#__PURE__*/React.createElement("div", {
     className: "w-full overflow-x-hidden"
   }, dateGroupedFiles.map(group => /*#__PURE__*/React.createElement("div", {
     key: group.dateHeading,
