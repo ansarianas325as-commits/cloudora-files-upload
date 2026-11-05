@@ -1,4 +1,4 @@
-import { put, list, del } from '@vercel/blob';
+import { put, list, del, get } from '@vercel/blob';
 import crypto from 'node:crypto';
 
 // CLOUDORA — per-user Telegram-storage server API for the uploaded-files UI.
@@ -130,20 +130,32 @@ function emptyDb() {
   return { version: 1, users: [], sessions: [], admin: null, files: [], folders: [],
     favourites: [], shares: [], trash: [], uploads: [], activity: [], settings: {} };
 }
+// Read a private blob server-side through the SDK, never via its URL:
+// downloadUrl is only a download-disposition URL, NOT a signed auth
+// URL, so fetching it for a private blob fails and loadDb would
+// silently return an empty DB (account "registered" but never found
+// again). get() authenticates with BLOB_READ_WRITE_TOKEN.
+async function readBlobText(pathname) {
+  try {
+    const r = await get(pathname, { access: 'private', useCache: false });
+    if (!r || !r.stream) return null;
+    return await new Response(r.stream).text();
+  } catch { return null; }
+}
 async function loadDb() {
   try {
     const { blobs } = await list({ prefix: 'db/' });
     if (!blobs.length) return emptyDb();
     blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
-    const r = await fetch(blobs[0].downloadUrl || blobs[0].url);
-    if (!r.ok) return emptyDb();
-    const db = await r.json();
+    const text = await readBlobText(blobs[0].pathname);
+    if (!text) return emptyDb();
+    const db = JSON.parse(text);
     if (!db || !Array.isArray(db.users)) return emptyDb();
     const base = { ...emptyDb(), ...db };
     for (const cand of blobs.slice(1, 21)) {
       try {
-        const rr = await fetch(cand.downloadUrl || cand.url); if (!rr.ok) continue;
-        const older = await rr.json(); if (!older || !Array.isArray(older.users)) continue;
+        const olderText = await readBlobText(cand.pathname); if (!olderText) continue;
+        const older = JSON.parse(olderText); if (!older || !Array.isArray(older.users)) continue;
         for (const u of older.users) if (!base.users.some(x => x.id === u.id)) base.users.push(u);
         for (const s of older.sessions || []) if (!base.sessions.some(x => x.token === s.token)) base.sessions.push(s);
         for (const [k, v] of Object.entries(older.settings || {})) if (!base.settings[k]) base.settings[k] = v;
@@ -283,7 +295,7 @@ async function tgDeleteMessage(chatId, messageId, cfg) {
   catch { return false; }
 }
 async function deleteStagingChunks(up) {
-  for (const c of Object.values(up.chunks || {})) { try { await del(c.url); } catch {} }
+  for (const c of Object.values(up.chunks || {})) { try { await del(c.pathname || c.url); } catch {} }
 }
 function parseLinkCode(text) {
   if (!text) return null;
@@ -672,7 +684,7 @@ export default async function handler(req, res) {
       const buf = Buffer.from(String(body.dataBase64 || ''), 'base64');
       if (!buf.length || buf.length > STAGING_CHUNK_BYTES) return json(res, 400, { ok: false, error: 'Empty or oversized chunk' });
       const blob = await put(`chunks/${up.id}/${index}.bin`, buf, { access: 'private', addRandomSuffix: false, allowOverwrite: true });
-      up.chunks[index] = { index, url: blob.url, downloadUrl: blob.downloadUrl || null, size: buf.length };
+      up.chunks[index] = { index, url: blob.url, pathname: blob.pathname, size: buf.length };
       await saveDb(db);
       return json(res, 200, { ok: true, index });
     }
@@ -685,9 +697,9 @@ export default async function handler(req, res) {
       if (missing.length) return json(res, 400, { ok: false, error: 'Missing chunks: ' + missing.join(',') });
       const parts = [];
       for (let i = 0; i < up.chunkCount; i++) {
-        const r = await fetch(up.chunks[i].downloadUrl || up.chunks[i].url);
-        if (!r.ok) return json(res, 502, { ok: false, error: 'Staging chunk could not be read. Retry the upload.' });
-        parts.push(Buffer.from(await r.arrayBuffer()));
+        const r = await get(up.chunks[i].pathname || up.chunks[i].url, { access: 'private', useCache: false });
+        if (!r || !r.stream) return json(res, 502, { ok: false, error: 'Staging chunk could not be read. Retry the upload.' });
+        parts.push(Buffer.from(await new Response(r.stream).arrayBuffer()));
       }
       const buf = Buffer.concat(parts);
       if (buf.length !== up.size) return json(res, 400, { ok: false, error: 'Reassembled file size does not match the uploaded size. Retry the upload.' });
