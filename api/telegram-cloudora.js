@@ -135,14 +135,14 @@ async function loadDb() {
     const { blobs } = await list({ prefix: 'db/' });
     if (!blobs.length) return emptyDb();
     blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
-    const r = await fetch(blobs[0].url);
+    const r = await fetch(blobs[0].downloadUrl || blobs[0].url);
     if (!r.ok) return emptyDb();
     const db = await r.json();
     if (!db || !Array.isArray(db.users)) return emptyDb();
     const base = { ...emptyDb(), ...db };
     for (const cand of blobs.slice(1, 21)) {
       try {
-        const rr = await fetch(cand.url); if (!rr.ok) continue;
+        const rr = await fetch(cand.downloadUrl || cand.url); if (!rr.ok) continue;
         const older = await rr.json(); if (!older || !Array.isArray(older.users)) continue;
         for (const u of older.users) if (!base.users.some(x => x.id === u.id)) base.users.push(u);
         for (const s of older.sessions || []) if (!base.sessions.some(x => x.token === s.token)) base.sessions.push(s);
@@ -157,7 +157,7 @@ async function saveDb(db) {
   // Metadata index only. Never file bytes, never a bot token.
   // Per-user Telegram chat ids live on user records in this index;
   // they are never returned to the browser (see publicUser).
-  await put(`db/${Date.now()}-${uid()}.json`, JSON.stringify(db), { access: 'public' });
+  await put(`db/${Date.now()}-${uid()}.json`, JSON.stringify(db), { access: 'private' });
   try {
     const { blobs } = await list({ prefix: 'db/' });
     blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
@@ -671,8 +671,8 @@ export default async function handler(req, res) {
       if (!Number.isInteger(index) || index < 0 || index >= up.chunkCount) return json(res, 400, { ok: false, error: 'Bad chunk index' });
       const buf = Buffer.from(String(body.dataBase64 || ''), 'base64');
       if (!buf.length || buf.length > STAGING_CHUNK_BYTES) return json(res, 400, { ok: false, error: 'Empty or oversized chunk' });
-      const blob = await put(`chunks/${up.id}/${index}.bin`, buf, { access: 'public', addRandomSuffix: false, allowOverwrite: true });
-      up.chunks[index] = { index, url: blob.url, size: buf.length };
+      const blob = await put(`chunks/${up.id}/${index}.bin`, buf, { access: 'private', addRandomSuffix: false, allowOverwrite: true });
+      up.chunks[index] = { index, url: blob.url, downloadUrl: blob.downloadUrl || null, size: buf.length };
       await saveDb(db);
       return json(res, 200, { ok: true, index });
     }
@@ -685,7 +685,7 @@ export default async function handler(req, res) {
       if (missing.length) return json(res, 400, { ok: false, error: 'Missing chunks: ' + missing.join(',') });
       const parts = [];
       for (let i = 0; i < up.chunkCount; i++) {
-        const r = await fetch(up.chunks[i].url);
+        const r = await fetch(up.chunks[i].downloadUrl || up.chunks[i].url);
         if (!r.ok) return json(res, 502, { ok: false, error: 'Staging chunk could not be read. Retry the upload.' });
         parts.push(Buffer.from(await r.arrayBuffer()));
       }
