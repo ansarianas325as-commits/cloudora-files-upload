@@ -5,6 +5,6 @@
   "type": "module",
   "description": "CLOUDORA uploaded-files UI with per-user Telegram storage: file bytes live in each user's own Telegram chat with the bot; account metadata only in the Vercel Blob index. No browser file storage.",
   "dependencies": {
-    "@vercel/blob": "^1.0.0"
+    "@vercel/blob": "^2.8.0"
   }
 }
