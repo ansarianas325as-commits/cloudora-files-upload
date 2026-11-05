@@ -687,6 +687,26 @@ function TelegramLinkPanel(props) {
   error ? React.createElement("p", { className: "text-xs text-rose-300 mt-2" }, error) : null);
 }
 
+function TelegramLoginButton(props) {
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    window.onTelegramAuth = props.onAuth;
+    const container = ref.current;
+    if (!container) return;
+    container.innerHTML = '';
+    const s = document.createElement('script');
+    s.src = 'https://telegram.org/js/telegram-widget.js?22';
+    s.async = true;
+    s.setAttribute('data-telegram-login', 'cloudora_vault_bot');
+    s.setAttribute('data-size', 'large');
+    s.setAttribute('data-request-access', 'write');
+    s.setAttribute('data-onauth', 'onTelegramAuth(user)');
+    container.appendChild(s);
+    return () => { try { container.innerHTML = ''; } catch {} };
+  }, []);
+  return React.createElement("div", { ref, className: "flex justify-center min-h-[40px]" });
+}
+
 function App()
  {
   const [db, setDb] = useState(() => loadInitialDbState());
@@ -973,6 +993,24 @@ function App()
     setAuthSecret('');
     showToast(`Welcome back, ${res.user ? res.user.fullName : cleanUsername}!`, 'success');
     await refreshCentral(res.token);
+  };
+
+  const handleTelegramAuth = async tgUser => {
+    setAuthError(null);
+    try {
+      const res = await apiPost('telegramLogin', { telegramAuth: tgUser });
+      if (!res.ok || !res.token) {
+        setAuthError(res.error || 'Telegram login failed. Please try again.');
+        return;
+      }
+      try { localStorage.setItem(CENTRAL_SESSION_KEY, res.token); } catch {}
+      setCurrentSessionToken(res.token);
+      setAuthSecret('');
+      showToast(`Welcome, ${res.user ? res.user.fullName : 'Telegram user'}! Your Telegram is linked — uploads will go to your own Telegram chat.`, 'success');
+      await refreshCentral(res.token);
+    } catch (e) {
+      setAuthError('Telegram login failed. Please try again.');
+    }
   };
 
   const handleAccountRecovery = async e => {
@@ -1732,7 +1770,21 @@ function App()
     })), /*#__PURE__*/React.createElement("button", {
       type: "submit",
       className: "w-full py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-teal-500 text-slate-950 font-bold text-sm shadow-lg"
-    }, "Verify & Reset Credentials")), db.users.length > 0 && /*#__PURE__*/React.createElement("div", {
+    }, "Verify & Reset Credentials")), /*#__PURE__*/React.createElement("div", {
+      className: "mt-5"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex items-center gap-3 mb-3"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex-1 h-px bg-slate-800"
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "text-[11px] text-slate-400"
+    }, "or"), /*#__PURE__*/React.createElement("div", {
+      className: "flex-1 h-px bg-slate-800"
+    })), /*#__PURE__*/React.createElement(TelegramLoginButton, {
+      onAuth: handleTelegramAuth
+    }), /*#__PURE__*/React.createElement("p", {
+      className: "text-[11px] text-slate-400 text-center mt-2"
+    }, "Log in with Telegram — your Telegram is linked automatically, and uploads go to your own Telegram chat.")), db.users.length > 0 && /*#__PURE__*/React.createElement("div", {
       className: "mt-5 pt-4 border-t border-slate-800/80"
     }, /*#__PURE__*/React.createElement("p", {
       className: "text-[11px] text-slate-400 mb-2"

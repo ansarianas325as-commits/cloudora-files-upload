@@ -1,9 +1,26 @@
-# CLOUDORA — per-user Telegram storage version (code only)
+# CLOUDORA — per-user Telegram storage version
 
-Status: **code only, NOT deployed, NOT pushed, NOT tested against live
-Telegram or Vercel.** Nothing in this folder claims the live site uses
-Telegram. That step (deploy + cross-browser test) happens only after the
-bot token exists and the deploy is explicitly authorised.
+Status: **LIVE at https://cloudora-files-upload.vercel.app/** (deployed 2026-11-05).
+Env vars set, webhook on, bot verified (telegramCheck: cloudora_vault_bot).
+Registration fixed live 2026-11-05 (Blob v2 upgrade + SDK get() reads).
+
+## Telegram Login Widget (added 2026-11-05)
+- Sign-in screen now has a **"Log in with Telegram"** button (legacy
+  Telegram Login Widget, `data-request-access="write"`). The user taps it,
+  confirms in Telegram, and the widget calls `window.onTelegramAuth(user)`.
+- Frontend POSTs the signed auth data to new server action `telegramLogin`,
+  which verifies the hash exactly as Telegram documents (HMAC-SHA256,
+  key = SHA256(bot token), auth_date within 24 h) and creates/links the
+  account: `telegramChatId` = Telegram user id, `telegramLinkedAt` set.
+  Login itself grants the bot write access, so **no separate link-code /
+  /start step is needed** — uploads from Cloudora go straight to that
+  user's own Telegram chat. Username/password login stays as a backup.
+- **BotFather step the operator must do once:** `/setdomain` for
+  @cloudora_vault_bot, domain `cloudora-files-upload.vercel.app` — without
+  it the widget shows "Bot domain invalid" and the button will not work.
+- Verified locally: hash verification accepts genuine signed data and
+  rejects tampered data. A full live widget login needs a real Telegram
+  account on the user's phone (not testable from the sandbox browser).
 
 ## The model in one paragraph
 
