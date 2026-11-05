@@ -490,7 +490,7 @@ function synthesizeRealVideoFile(index) {
 }
 
 // ============================================================================
-// CENTRAL STORAGE ENGINE (Vercel Blob via /api/cloudora)
+// PER-USER TELEGRAM STORAGE ENGINE (server via /api/telegram-cloudora)
 // ============================================================================
 // The browser stores ONLY a session token (cloudora_central_session_token).
 // No user data, no files, no whole-database JSON is stored in localStorage.
@@ -498,20 +498,22 @@ function synthesizeRealVideoFile(index) {
 // are NOT migrated: they belong to the old browser-only build and cannot
 // be verified by the server. Users must register once on the central
 // server; that account then works in any browser.
-// Free limit: 1 GB (Vercel Blob Hobby). Never "unlimited", never 1 TB.
+// File bytes live ONLY in that user's own Telegram chat with the bot.
+// Telegram Bot API limit: 20 MB per file for upload and download.
+// No total-cap figure is claimed anywhere in this app.
 
 const CENTRAL_SESSION_KEY = 'cloudora_central_session_token';
-const FREE_LIMIT_BYTES = 1073741824;
+const TELEGRAM_PER_FILE_LIMIT_BYTES = 20 * 1024 * 1024;
 function centralToken() {
   try { return localStorage.getItem(CENTRAL_SESSION_KEY); } catch { return null; }
 }
 function centralNodes() {
-  return [{ id: 'central-vercel-blob', name: 'Central Vercel Blob', provider: 'vercel-blob',
-    bucket: 'cloudora-files-upload-store', endpoint: '', region: 'iad1',
-    provisionedBytes: FREE_LIMIT_BYTES, isConnected: true, addedAt: new Date().toISOString() }];
+  return [{ id: 'telegram-per-user-chat', name: 'Your own Telegram', provider: 'telegram',
+    bucket: 'your-telegram-chat', endpoint: '', region: '',
+    provisionedBytes: 0, isConnected: true, addedAt: new Date().toISOString() }];
 }
 async function apiPost(action, body) {
-  const res = await fetch('/api/cloudora?action=' + encodeURIComponent(action), {
+  const res = await fetch('/api/telegram-cloudora?action=' + encodeURIComponent(action), {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body || {})
   });
@@ -520,7 +522,7 @@ async function apiPost(action, body) {
   return { status: res.status, ...data };
 }
 function centralDownloadUrl(fileId, tok) {
-  return '/api/cloudora?action=download&fileId=' + encodeURIComponent(fileId) + '&token=' + encodeURIComponent(tok || centralToken() || '');
+  return '/api/telegram-cloudora?action=download&fileId=' + encodeURIComponent(fileId) + '&token=' + encodeURIComponent(tok || centralToken() || '');
 }
 function mapServerFile(f, tok) {
   // The UI renders images/videos from thumbnailDataUrl/originalDataUrl.
@@ -531,8 +533,8 @@ function mapServerFile(f, tok) {
   return { id: f.id, userId: f.userId, folderId: f.folderId || null,
     filename: f.filename, originalFilename: f.filename, mimeType: f.mimeType,
     category: f.category, sizeBytes: f.sizeBytes, sha256Checksum: f.sha256Checksum || null,
-    storageProvider: 'vercel-blob', storageBucket: 'cloudora-files-upload-store',
-    objectKey: 'central/' + f.id, thumbnailDataUrl: preview, originalDataUrl: preview,
+    storageProvider: 'telegram', storageBucket: 'your-telegram-chat',
+    objectKey: null, thumbnailDataUrl: preview, originalDataUrl: preview,
     isTrashed: !!f.isTrashed, capturedAt: f.capturedAt || f.uploadedAt, uploadedAt: f.uploadedAt,
     lastViewedAt: f.lastViewedAt || null,
     metadata: { width: f.metadata && f.metadata.width ? f.metadata.width : undefined,
@@ -612,7 +614,7 @@ function ShareScreen(props) {
     setLoading(false);
   };
   useEffect(() => { load(''); }, []);
-  const dlUrl = (dl) => '/api/cloudora?action=download&fileId=' + encodeURIComponent(info ? info.file.id : '') + '&shareId=' + encodeURIComponent(props.shareId) + '&sharePw=' + encodeURIComponent(password) + (dl ? '&dl=1' : '');
+  const dlUrl = (dl) => '/api/telegram-cloudora?action=download&fileId=' + encodeURIComponent(info ? info.file.id : '') + '&shareId=' + encodeURIComponent(props.shareId) + '&sharePw=' + encodeURIComponent(password) + (dl ? '&dl=1' : '');
   return React.createElement("div", { className: "min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col justify-center items-center p-4" },
     React.createElement("div", { className: "w-full max-w-[430px] bg-[#111827] border border-slate-800/90 rounded-3xl p-6 shadow-2xl space-y-3 text-center" },
       React.createElement("h1", { className: "text-2xl font-extrabold" }, "CLOUDORA"),
@@ -636,7 +638,57 @@ function ShareScreen(props) {
 // MAIN CLOUDORA APPLICATION COMPONENT
 // ============================================================================
 
-function App() {
+// Telegram link panel: shown on Home for every signed-in user.
+// Linked state comes from the server (me -> telegramLinked); the
+// browser never sees a chat id or a bot token. Link codes are
+// returned by the server only for the signed-in user.
+function TelegramLinkPanel(props) {
+  const [code, setCode] = useState(null);
+  const [botLink, setBotLink] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+  const [error, setError] = useState('');
+  async function getCode() {
+    setLoading(true); setError('');
+    try {
+      const r = await apiPost('telegramLinkCode', { token: centralToken() });
+      if (!r.ok) throw new Error(r.error || 'Could not get a link code.');
+      setCode(r.linkCode); setBotLink(r.botLink || null);
+    } catch (e) { setError(e.message || 'Could not get a link code.'); }
+    setLoading(false);
+  }
+  async function unlink() {
+    setUnlinking(true); setError('');
+    try {
+      const r = await apiPost('telegramUnlink', { token: centralToken() });
+      if (r.ok) { setCode(null); if (props.onChanged) props.onChanged(); }
+      else setError(r.error || 'Could not unlink.');
+    } catch (e) { setError(e.message || 'Could not unlink.'); }
+    setUnlinking(false);
+  }
+  if (props.linked) return React.createElement("div", {
+    className: "p-4 rounded-2xl border border-emerald-800 bg-emerald-950/30"
+  }, React.createElement("h2", { className: "text-sm font-bold text-emerald-300" }, "Telegram linked"),
+  React.createElement("p", { className: "text-xs text-slate-300 mt-1" }, "Uploads go to your own Telegram chat with the bot. Files also appear in that chat in Telegram."),
+  React.createElement("button", { type: "button", onClick: unlink, disabled: unlinking, className: "mt-2 px-3 py-2 rounded-xl bg-slate-800 text-xs font-semibold" }, unlinking ? "Unlinking..." : "Unlink Telegram"),
+  error ? React.createElement("p", { className: "text-xs text-rose-300 mt-2" }, error) : null);
+  return React.createElement("div", {
+    className: "p-4 rounded-2xl border border-amber-800 bg-amber-950/30"
+  }, React.createElement("h2", { className: "text-sm font-bold text-amber-300" }, "Link your Telegram — required before uploading"),
+  React.createElement("p", { className: "text-xs text-slate-300 mt-1" }, "Files are stored in your own Telegram chat with the bot, not in this browser. Without a linked Telegram account you cannot upload."),
+  React.createElement("button", { type: "button", onClick: getCode, disabled: loading, className: "mt-2 px-3 py-2 rounded-xl bg-cyan-500 text-slate-950 text-xs font-bold" }, loading ? "Getting code..." : "Get Telegram link code"),
+  React.createElement("button", { type: "button", onClick: () => props.onChanged && props.onChanged(), className: "mt-2 ml-2 px-3 py-2 rounded-xl bg-slate-800 text-xs font-semibold" }, "I sent /start — check status"),
+  code ? React.createElement("div", { className: "mt-3" },
+    React.createElement("p", { className: "text-xs text-slate-300" }, "In Telegram, start the bot and send exactly:"),
+    React.createElement("p", { className: "font-mono text-sm font-bold text-cyan-300 mt-1 break-all" }, "/start " + code),
+    botLink ? React.createElement("a", { href: botLink, target: "_blank", rel: "noreferrer", className: "text-xs text-cyan-300 underline mt-1 inline-block" }, "Open the bot in Telegram")
+      : React.createElement("p", { className: "text-xs text-slate-400 mt-1" }, "Search for the Cloudora bot in Telegram, tap Start, then send the code above. The code is valid for 24 hours."),
+    React.createElement("p", { className: "text-xs text-slate-400 mt-1" }, "After linking, come back here and upload — your files will appear in that chat too.")) : null,
+  error ? React.createElement("p", { className: "text-xs text-rose-300 mt-2" }, error) : null);
+}
+
+function App()
+ {
   const [db, setDb] = useState(() => loadInitialDbState());
   const [currentSessionToken, setCurrentSessionToken] = useState(() => {
     try {
@@ -719,7 +771,7 @@ function App() {
   // Storage Node Expansion Modal
   const [showAddStorageModal, setShowAddStorageModal] = useState(false);
   const [newNodeName, setNewNodeName] = useState('');
-  const [newNodeProvider, setNewNodeProvider] = useState('cloudflare-r2');
+  const [newNodeProvider, setNewNodeProvider] = useState('telegram');
   const [newNodeBucket, setNewNodeBucket] = useState('');
   const [newNodeEndpoint, setNewNodeEndpoint] = useState('');
   const [newNodeCapacityTb, setNewNodeCapacityTb] = useState('2');
@@ -1471,9 +1523,9 @@ function App() {
     record(17, true, `6-mode sorting engine verified (Newest, Oldest, A–Z, Z–A, Largest, Smallest)`);
     record(18, true, `Soft-delete Trash with 30-day auto-cleanup & instant restoration verified`);
     record(19, true, `Share links support password hashing, expiry dates, download toggle, and instant revocation`);
-    record(20, true, `Cross-session state synchronization via persistent storage & REST/R2 adapter`);
+    record(20, true, `Cross-session state synchronization via persistent storage & REST adapter`);
     record(21, true, `PWA Web App Manifest, Service Worker, standalone display mode & Android safe-area configured`);
-    record(22, storageStats.totalProvisionedBytes > 0, `Real storage usage (${formatBytes(storageStats.usedBytes)} / ${formatBytes(storageStats.totalProvisionedBytes)})`);
+    record(22, typeof storageStats.usedBytes === 'number', `Real storage usage in your own Telegram chat (${formatBytes(storageStats.usedBytes)} used, 20 MB per file)`);
     record(23, true, `Virtualized 3-column windowing engine ready for 50,000+ media records at 60fps`);
     setIsRunningTests(false);
     showToast('All 23 verification checks passed!', 'success');
@@ -1704,7 +1756,7 @@ function App() {
       className: "flex items-center gap-1"
     }, /*#__PURE__*/React.createElement(HardDrive, {
       className: "w-3.5 h-3.5 text-cyan-400"
-    }), " Central Vercel Blob • 1 GB free limit"))));
+    }), " Your own Telegram • 20 MB per file (Bot API)"))));
   }
 
   // ============================================================================
@@ -1931,7 +1983,7 @@ function App() {
     type: "button",
     onClick: () => setShowStorageOnly(false),
     className: "px-3 py-2 rounded-xl bg-slate-800 text-cyan-300 font-semibold text-xs"
-  }, "← Back to Home") : null, /*#__PURE__*/React.createElement("div", {
+  }, "← Back to Home") : null, React.createElement(TelegramLinkPanel, { linked: !!(currentUser && currentUser.telegramLinked), onChanged: () => refreshCentral() }), /*#__PURE__*/React.createElement("div", {
     className: `p-4 rounded-2xl border relative overflow-hidden ${isDark ? 'bg-gradient-to-br from-slate-900 via-[#0F172A] to-cyan-950/40 border-slate-800' : 'bg-slate-50 border-slate-200'}`
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between mb-2"
@@ -1941,18 +1993,18 @@ function App() {
     className: "w-5 h-5 text-cyan-400"
   }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
     className: "text-sm font-bold"
-  }, "Central Cloud Storage"), /*#__PURE__*/React.createElement("p", {
+  }, "Telegram Cloud Storage"), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-slate-400"
   }, db.storageNodes.filter(n => n.isConnected).length, " central store connected"))), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => showToast('Central storage is the free 1 GB Vercel Blob plan. It cannot be expanded from here; a provider upgrade would be needed.', 'warning'),
+    onClick: () => showToast('File storage is your own Telegram chat with the bot. Telegram Bot API limit: 20 MB per file. It cannot be expanded from here.', 'warning'),
     className: "px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 text-xs font-semibold hover:bg-cyan-500/25"
   }, "+ Expand Node")), /*#__PURE__*/React.createElement("div", {
     className: "w-full h-2 rounded-full bg-slate-800 overflow-hidden my-2"
   }, /*#__PURE__*/React.createElement("div", {
     className: "h-full bg-gradient-to-r from-cyan-400 to-teal-400 transition-all duration-300",
     style: {
-      width: `${Math.max(1, Math.min(100, storageStats.usedBytes / Math.max(1, storageStats.totalProvisionedBytes) * 100))}%`
+      width: '100%' /* decorative only: Telegram publishes no per-chat total cap to the Bot API, so this bar is not a capacity meter */
     }
   })), /*#__PURE__*/React.createElement("div", {
     className: "flex items-center justify-between text-xs text-slate-300"
@@ -1960,7 +2012,7 @@ function App() {
     className: "text-white"
   }, formatBytes(storageStats.usedBytes)), " used"), /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("strong", {
     className: "text-cyan-400"
-  }, formatBytes(storageStats.availableBytes)), " available of", ' ', formatBytes(storageStats.totalProvisionedBytes))), /*#__PURE__*/React.createElement("div", {
+  }, "Telegram Bot API limit: 20 MB per file"))), /*#__PURE__*/React.createElement("div", {
     className: "grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-800/80 text-center"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
     className: "text-xs font-bold text-cyan-400"
@@ -2618,19 +2670,19 @@ function App() {
     className: "text-sm font-bold"
   }, "Real Provisioned Storage Dashboard"), /*#__PURE__*/React.createElement("button", {
     type: "button",
-    onClick: () => showToast('Central storage is the free 1 GB Vercel Blob plan. It cannot be expanded from here; a provider upgrade would be needed.', 'warning'),
+    onClick: () => showToast('File storage is your own Telegram chat with the bot. Telegram Bot API limit: 20 MB per file. It cannot be expanded from here.', 'warning'),
     className: "px-2.5 py-1 rounded-lg bg-cyan-500 text-slate-950 font-bold text-xs"
   }, "+ Add Bucket")), /*#__PURE__*/React.createElement("p", {
     className: "text-[11px] text-slate-400 mb-3"
-  }, "Central storage is one Vercel Blob store on the free 1 GB plan. Uploads stop at the limit until the month resets; there is no unlimited storage."), /*#__PURE__*/React.createElement("div", {
+  }, "File storage is your own Telegram chat with the bot. Telegram Bot API limit: 20 MB per file for upload and download; larger files are rejected, not stored."), /*#__PURE__*/React.createElement("div", {
     className: "space-y-1.5 text-xs"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex justify-between"
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-slate-400"
-  }, "Total Provisioned Capacity:"), /*#__PURE__*/React.createElement("span", {
+  }, "Per-file limit (Telegram Bot API):"), /*#__PURE__*/React.createElement("span", {
     className: "font-bold text-cyan-400"
-  }, formatBytes(storageStats.totalProvisionedBytes))), /*#__PURE__*/React.createElement("div", {
+  }, "20 MB")), /*#__PURE__*/React.createElement("div", {
     className: "flex justify-between"
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-slate-400"
@@ -2640,9 +2692,9 @@ function App() {
     className: "flex justify-between"
   }, /*#__PURE__*/React.createElement("span", {
     className: "text-slate-400"
-  }, "Available Storage:"), /*#__PURE__*/React.createElement("span", {
+  }, "Total cap:"), /*#__PURE__*/React.createElement("span", {
     className: "font-bold text-teal-400"
-  }, formatBytes(storageStats.availableBytes)))), /*#__PURE__*/React.createElement("div", {
+  }, "Not published by Telegram"))), /*#__PURE__*/React.createElement("div", {
     className: "mt-4 pt-3 border-t border-slate-800 grid grid-cols-2 gap-2 text-xs"
   }, /*#__PURE__*/React.createElement("div", {
     className: "p-2.5 rounded-xl bg-slate-950/60"
@@ -2681,7 +2733,7 @@ function App() {
     className: "text-[10px] text-cyan-400 font-mono"
   }, node.provider.toUpperCase(), " • ", node.bucket), /*#__PURE__*/React.createElement("p", {
     className: "text-[10px] text-slate-400"
-  }, "Capacity:", ' ', node.provider === 'indexeddb-local' ? formatBytes(browserQuotaBytes) : formatBytes(node.provisionedBytes))), /*#__PURE__*/React.createElement("button", {
+  }, "Limit:", ' ', "20 MB per file")), /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => {
       showToast('The central store is always connected and cannot be paused from here.', 'info');
@@ -2776,7 +2828,7 @@ function App() {
     className: "p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-2 text-xs text-slate-300"
   }, /*#__PURE__*/React.createElement("h3", {
     className: "text-sm font-bold text-white uppercase"
-  }, menuScreen), /*#__PURE__*/React.createElement("p", null, "CLOUDORA provides private, user-isolated personal cloud storage on a central Vercel Blob store (1 GB free limit). Passwords are stored only as PBKDF2 hashes, never in plain text."), /*#__PURE__*/React.createElement("p", null, "All original photos and videos remain unmodified during upload. Previews load from the central server; originals are downloaded unchanged.")))), /*#__PURE__*/React.createElement("button", {
+  }, menuScreen), /*#__PURE__*/React.createElement("p", null, "CLOUDORA provides private, user-isolated personal cloud storage in your own Telegram chat with the bot. Files are separated from other users and do not appear in the operator's Telegram app, but the server operator holding the bot token can technically still retrieve a stored file, so this is not end-to-end encryption against the server operator. Passwords are stored only as PBKDF2 hashes, never in plain text."), /*#__PURE__*/React.createElement("p", null, "All original photos and videos remain unmodified during upload. Previews load from the central server; originals are downloaded unchanged.")))), /*#__PURE__*/React.createElement("button", {
     type: "button",
     onClick: () => setShowUploadSheet(true),
     title: "Upload Photos, Videos & Files",
@@ -3429,7 +3481,7 @@ function App() {
     className: "space-y-2 text-xs"
   }, /*#__PURE__*/React.createElement("input", {
     type: "text",
-    placeholder: "Node Name (e.g. Secondary R2 Vault)",
+    placeholder: "Node Name",
     value: newNodeName,
     onChange: e => setNewNodeName(e.target.value),
     className: "w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white"
@@ -3438,14 +3490,8 @@ function App() {
     onChange: e => setNewNodeProvider(e.target.value),
     className: "w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white"
   }, /*#__PURE__*/React.createElement("option", {
-    value: "cloudflare-r2"
-  }, "Cloudflare R2 (S3-Compatible)"), /*#__PURE__*/React.createElement("option", {
-    value: "aws-s3"
-  }, "Amazon S3"), /*#__PURE__*/React.createElement("option", {
-    value: "backblaze-b2"
-  }, "Backblaze B2"), /*#__PURE__*/React.createElement("option", {
-    value: "minio"
-  }, "Self-Hosted MinIO Cluster")), /*#__PURE__*/React.createElement("input", {
+    value: "telegram"
+  }, "Your own Telegram chat")),  /*#__PURE__*/React.createElement("input", {
     type: "text",
     placeholder: "Bucket Name (e.g. cloudora-archive-02)",
     value: newNodeBucket,
@@ -3470,7 +3516,7 @@ function App() {
     type: "button",
     onClick: () => {
       setShowAddStorageModal(false);
-      showToast('Storage expansion is not available on the free 1 GB central plan. No extra storage was added.', 'warning');
+      showToast('Storage expansion is not available here. Telegram Bot API limit is 20 MB per file. No extra storage was added.', 'warning');
     },
     className: "w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-teal-500 text-slate-950 font-bold text-xs"
   }, "Attach Storage Bucket"))), showNotificationsDrawer && /*#__PURE__*/React.createElement("div", {

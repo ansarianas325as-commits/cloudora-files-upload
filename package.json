@@ -1,9 +1,9 @@
 {
-  "name": "cloudora-central",
+  "name": "cloudora-telegram",
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "CLOUDORA uploaded-files UI with a central Vercel Blob backend. No browser-only storage.",
+  "description": "CLOUDORA uploaded-files UI with per-user Telegram storage: file bytes live in each user's own Telegram chat with the bot; account metadata only in the Vercel Blob index. No browser file storage.",
   "dependencies": {
     "@vercel/blob": "^1.0.0"
   }
