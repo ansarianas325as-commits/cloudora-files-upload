@@ -421,6 +421,67 @@ export default async function handler(req, res) {
       } catch (e) { return json(res, 502, { ok: false, error: sanitizeTelegramError(e.message, cfg) }); }
     }
 
+    // ---- Telegram Login Widget (direct Telegram login in Cloudora) ----
+    // The user taps "Log in with Telegram" on the sign-in screen, confirms
+    // in Telegram, and the widget hands the browser signed auth data
+    // (id, first_name, username, auth_date, hash). The server verifies
+    // the hash against the bot token, exactly as Telegram documents:
+    // data-check-string = sorted "key=value" lines (hash excluded),
+    // HMAC-SHA256 with key = SHA256(bot token). A valid login ALSO links
+    // Telegram automatically: telegramChatId = the Telegram user id, and
+    // the bot was granted write access by the login itself
+    // (data-request-access="write"), so uploads from Cloudora are sent
+    // to that user's own Telegram chat with no separate link-code step.
+    if (action === 'telegramLogin') {
+      if (!tgConfigured()) return json(res, 500, { ok: false, error: 'Telegram is not configured on the server.' });
+      const a = (body.telegramAuth && typeof body.telegramAuth === 'object') ? body.telegramAuth : {};
+      const tgId = Number(a.id);
+      const authDate = Number(a.auth_date);
+      const hash = String(a.hash || '');
+      if (!Number.isInteger(tgId) || tgId <= 0 || !authDate || !hash) return json(res, 400, { ok: false, error: 'Telegram login data is incomplete. Please try again.' });
+      if (Math.abs(Date.now() / 1000 - authDate) > 86400) return json(res, 401, { ok: false, error: 'Telegram login expired. Please try again.' });
+      const checkString = Object.keys(a).filter(k => k !== 'hash').sort().map(k => `${k}=${a[k]}`).join('\n');
+      const secretKey = crypto.createHash('sha256').update(cfg.token).digest();
+      const expected = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
+      let hashOk = false;
+      try { hashOk = expected.length === hash.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(hash)); } catch { hashOk = false; }
+      if (!hashOk) return json(res, 401, { ok: false, error: 'Telegram login could not be verified. Please try again.' });
+      const tgUsername = String(a.username || '').trim().toLowerCase();
+      const fullName = [String(a.first_name || '').trim(), String(a.last_name || '').trim()].filter(Boolean).join(' ') || (tgUsername ? `@${tgUsername}` : `Telegram ${tgId}`);
+      let user = db.users.find(u => u.telegramId === tgId || u.telegramChatId === tgId);
+      if (!user && tgUsername && /^[a-z0-9_.-]{3,32}$/.test(tgUsername)) {
+        const byName = db.users.find(u => u.username === tgUsername && !u.telegramChatId && !u.telegramId);
+        if (byName) user = byName; // link this Telegram account to the existing unlinked Cloudora account
+      }
+      if (!user) {
+        let username = (/^[a-z0-9_.-]{3,32}$/.test(tgUsername)) ? tgUsername : `tg_${tgId}`;
+        if (db.users.some(u => u.username === username)) username = `tg_${tgId}`;
+        const s = salt(), recSalt = salt();
+        const randomSecret = crypto.randomBytes(32).toString('hex');
+        user = { id: uid(), fullName, username, authType: 'telegram', passwordHash: hashPw(randomSecret, s), salt: s,
+          recoveryHash: hashPw(randomSecret, recSalt), recoverySalt: recSalt,
+          telegramId: tgId, telegramChatId: tgId, telegramLinkedAt: new Date().toISOString(), telegramUsername: tgUsername || null,
+          telegramLinkCode: null, telegramLinkCodeExpiresAt: null,
+          failedLoginAttempts: 0, lockedUntil: null, createdAt: new Date().toISOString(), lastActive: new Date().toISOString(), country };
+        db.users.push(user);
+        db.settings[user.id] = { theme: 'dark', galleryLayout: 'grid', gridColumns: 3, defaultSort: 'newest',
+          showDateHeadings: true, showFilenames: false, showFileSizes: false, showVideoInfo: true,
+          uploadConcurrency: 3, chunkSizeKb: 256, duplicateDetection: true, autoRetryUploads: true, notificationsEnabled: true };
+        for (const name of ['Camera Roll', 'Documents & Receipts']) {
+          db.folders.push({ id: uid(), userId: user.id, parentId: null, name, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+        }
+        log(db, user.id, 'telegram_login_created', null, username, country);
+      } else {
+        user.telegramId = tgId; user.telegramChatId = tgId; user.telegramLinkedAt = user.telegramLinkedAt || new Date().toISOString();
+        user.telegramUsername = tgUsername || user.telegramUsername || null; user.lastActive = new Date().toISOString();
+        log(db, user.id, 'telegram_login', null, user.username, country);
+      }
+      const tok = token();
+      db.sessions.push({ token: tok, userId: user.id, expiresAt: Date.now() + 30 * 24 * 3600 * 1000 });
+      await saveDb(db);
+      return json(res, 200, { ok: true, token: tok, user: publicUser(user) });
+    }
+
     // ---- Auth (register / login / recover) ----
     if (action === 'register') {
       const fullName = String(body.fullName || body.name || '').trim();
